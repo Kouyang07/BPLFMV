@@ -1,0 +1,13 @@
+# Ignore everything
+*
+
+# But don't ignore these specific files
+!calculate_location.py
+!detect_court.py
+!detect_pose.py
+!remove_artifact.py
+!visualize.py
+
+# Don't ignore .gitignore itself
+!.gitignore
+
