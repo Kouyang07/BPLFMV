@@ -471,7 +471,7 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
 def main():
     parser = argparse.ArgumentParser(description='Unified jump analysis using ML detection and weighted position data')
     parser.add_argument('video_path', help='Path to the input video file')
-    parser.add_argument('--model', default='roboflow/runs/detect/badminton_poses/weights/best.pt',
+    parser.add_argument('--model', default='resources/BLPFMV.pt',
                         help='Path to YOLO model weights')
     parser.add_argument('--confidence', type=float, default=0.2,
                         help='Confidence threshold for ML detections')

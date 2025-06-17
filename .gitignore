@@ -8,7 +8,8 @@
 !detect_pose_enhanced.py
 !remove_artifact.py
 !visualize.py
-
+!resources/BLPFMV.pt
+!resources/detect
 # Don't ignore .gitignore itself
 !.gitignore
 
