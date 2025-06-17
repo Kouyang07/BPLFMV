@@ -5,6 +5,7 @@
 !calculate_location.py
 !detect_court.py
 !detect_pose.py
+!detect_pose_enhanced.py
 !remove_artifact.py
 !visualize.py
 
