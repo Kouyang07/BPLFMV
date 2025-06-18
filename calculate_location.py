@@ -136,7 +136,7 @@ class BadmintonCourtTracker:
 
         self.rotation_vector = rvec
         self.translation_vector = tvec
-        self.camera_height = abs(float(tvec[2]))
+        self.camera_height = abs(float(tvec[2][0]))  # Fix deprecation warning
 
         # Calculate camera position in world coordinates
         rotation_matrix, _ = cv2.Rodrigues(rvec)
@@ -564,8 +564,11 @@ class BadmintonCourtTracker:
             else:
                 averaged[key] = 0.0
 
-        # Use the first tracked_id (will be remapped later anyway)
-        averaged['tracked_id'] = positions[0]['tracked_id']
+        # Use the first tracked_id if available, otherwise assign a temporary one
+        if 'tracked_id' in positions[0]:
+            averaged['tracked_id'] = positions[0]['tracked_id']
+        else:
+            averaged['tracked_id'] = -1  # Temporary ID, will be assigned later
 
         if self.debug:
             print(f"Merged {len(positions)} close detections into one position")
@@ -683,11 +686,13 @@ class BadmintonCourtTracker:
             if position:
                 frame_positions.append(position)
 
-        # Merge close detections in this frame
+        # First assign temporary tracking IDs
+        frame_positions = self.assign_player_ids(frame_positions)
+
+        # Then merge close detections (now that all positions have tracked_id)
         frame_positions = self.merge_close_detections_in_frame(frame_positions)
 
-        # Assign temporary tracking IDs
-        return self.assign_player_ids(frame_positions)
+        return frame_positions
 
     def process_all_frames(self) -> None:
         """Process all frames with adaptive hip height."""

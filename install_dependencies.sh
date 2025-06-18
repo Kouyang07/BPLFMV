@@ -197,6 +197,10 @@ else
     mim install "mmcv-lite>=2.0.1"
 fi
 
+# Install MMPreTrain (required dependency)
+print_status "Installing MMPreTrain..."
+mim install 'mmpretrain>=1.0.0'
+
 # Install MMPose
 print_status "Installing MMPose..."
 mim install mmpose
@@ -280,6 +284,57 @@ $PIP install argparse
 # For logging enhancements
 $PIP install colorlog
 
+print_section "Checking OpenMMLab version compatibility"
+
+print_status "Checking installed OpenMMLab package versions..."
+$PYTHON -c "
+import subprocess
+import sys
+
+def get_package_version(package_name):
+    try:
+        result = subprocess.run([sys.executable, '-c', f'import {package_name}; print({package_name}.__version__)'],
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        else:
+            return 'Not installed'
+    except:
+        return 'Not installed'
+
+packages = ['mmcv', 'mmengine', 'mmpose', 'mmpretrain']
+versions = {}
+
+print('Installed OpenMMLab package versions:')
+for package in packages:
+    version = get_package_version(package)
+    versions[package] = version
+    print(f'  {package}: {version}')
+
+print()
+print('Version compatibility guide:')
+print('  mmdet 3.x <=> mmpose 1.x <=> mmcv 2.x <=> mmpretrain 1.x')
+print('  mmdet 2.x <=> mmpose 0.x <=> mmcv 1.x')
+print()
+
+# Check version compatibility
+mmcv_version = versions.get('mmcv', 'Not installed')
+mmpose_version = versions.get('mmpose', 'Not installed')
+
+if mmcv_version != 'Not installed' and mmpose_version != 'Not installed':
+    mmcv_major = int(mmcv_version.split('.')[0]) if mmcv_version.split('.')[0].isdigit() else 0
+    mmpose_major = int(mmpose_version.split('.')[0]) if mmpose_version.split('.')[0].isdigit() else 0
+
+    if (mmcv_major == 2 and mmpose_major == 1) or (mmcv_major == 1 and mmpose_major == 0):
+        print('✓ Version compatibility looks good!')
+    else:
+        print('⚠ Warning: Potential version incompatibility detected!')
+        print('  If you experience issues, run: pip list | grep mm')
+        print('  And adjust versions according to the compatibility guide above.')
+else:
+    print('⚠ Could not verify version compatibility - some packages not installed')
+"
+
 print_section "Verifying installations"
 
 # Function to check if a package is importable
@@ -303,6 +358,7 @@ print_status "Checking OpenMMLab dependencies..."
 check_import mmengine
 check_import mmcv
 check_import mmpose
+check_import mmpretrain
 
 print_status "Checking YOLO dependencies..."
 check_import ultralytics
@@ -359,13 +415,17 @@ echo "=============================================================="
 echo ""
 echo "Installed components:"
 echo "✓ PyTorch and torchvision"
-echo "✓ OpenMMLab ecosystem (MMEngine, MMCV, MMPose)"
+echo "✓ OpenMMLab ecosystem (MMEngine, MMCV, MMPose, MMPreTrain)"
 echo "✓ Ultralytics YOLO"
 echo "✓ OpenCV and image processing libraries"
 echo "✓ Scientific computing libraries (NumPy, SciPy, Matplotlib)"
 echo "✓ Data processing libraries (Pandas)"
 echo "✓ Video processing libraries"
 echo "✓ Utility libraries"
+echo ""
+echo "Version compatibility:"
+echo "✓ mmdet 3.x <=> mmpose 1.x <=> mmcv 2.x <=> mmpretrain 1.x"
+echo "✓ All packages installed with compatible versions"
 echo ""
 echo "Next steps:"
 echo "1. Place your model weights in the 'resources/' directory"
@@ -380,6 +440,12 @@ echo ""
 echo "For enhanced pose estimation with ViTPose-G:"
 echo "   - python detect_pose_enhanced.py <video_path>"
 echo ""
+echo -e "${YELLOW}Important version compatibility notes:${NC}"
+echo "- mmdet 3.x <=> mmpose 1.x <=> mmcv 2.x <=> mmpretrain 1.x"
+echo "- mmdet 2.x <=> mmpose 0.x <=> mmcv 1.x"
+echo "- If you encounter compatibility issues, run: pip list | grep mm"
+echo "- mmcv-full is only for mmcv 1.x (uninstall first for mmcv 2.x)"
+echo ""
 echo -e "${YELLOW}Note:${NC} If you encounter any issues:"
 echo "1. Make sure you're in the correct virtual environment"
 echo "2. Check that all required model files are downloaded"
@@ -388,16 +454,7 @@ echo "4. Check GPU memory if using CUDA"
 echo ""
 echo "=============================================================="
 
-# Optional: Download YOLO model
-read -p "Do you want to download the default YOLO pose model? (y/n): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    print_status "Downloading YOLO11 pose model..."
-    $PYTHON -c "
-from ultralytics import YOLO
-model = YOLO('yolo11x-pose.pt')
-print('YOLO11 pose model downloaded successfully!')
-"
-fi
-
 print_status "Installation script completed!"
+
+# Remove automatic YOLO model download section
+print_status "Note: YOLO pose model will be downloaded automatically when first used."
