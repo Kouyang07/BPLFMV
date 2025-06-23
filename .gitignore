@@ -10,7 +10,10 @@
 !visualize.py
 !resources/
 !resources/**
+!evaluation/**
+!evaluation/
 !install_dependencies.sh
+
 # Don't ignore .gitignore itself
 !.gitignore
 

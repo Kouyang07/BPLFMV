@@ -6,6 +6,7 @@ Converts pose detection data to precise 2D world coordinates on badminton court.
 Uses adaptive hip height calculation and ray-plane intersection for accuracy.
 Limits tracking to exactly two players by merging multiple detections.
 Fixed ankle offset correction for proper ground projection.
+FIXED: Corrected court point mapping to eliminate left/right mirroring.
 
 Usage: python track_positions.py <video_file_path> [--debug]
 """
@@ -89,6 +90,11 @@ class BadmintonCourtTracker:
             raise ValueError(f"Missing required court points: {required_points}")
 
         print(f"Loaded pose data with {len(data.get('pose_data', []))} pose detections")
+        print("Court points mapping:")
+        print("  P1: Upper baseline + LEFT sideline")
+        print("  P2: Lower baseline + LEFT sideline")
+        print("  P3: Lower baseline + RIGHT sideline")
+        print("  P4: Upper baseline + RIGHT sideline")
 
     def estimate_camera_intrinsics(self) -> np.ndarray:
         """Estimate camera intrinsic matrix from video dimensions."""
@@ -108,20 +114,20 @@ class BadmintonCourtTracker:
 
     def solve_camera_pose(self) -> None:
         """Determine camera position and height using solvePnP."""
-        # Image points (pixels)
+        # Image points (pixels) - corrected order based on actual court point definitions
         image_points = np.array([
-            self.court_points['P1'],  # Top-right
-            self.court_points['P2'],  # Bottom-right
-            self.court_points['P3'],  # Bottom-left
-            self.court_points['P4']   # Top-left
+            self.court_points['P1'],  # Upper baseline + LEFT sideline
+            self.court_points['P2'],  # Lower baseline + LEFT sideline
+            self.court_points['P3'],  # Lower baseline + RIGHT sideline
+            self.court_points['P4']   # Upper baseline + RIGHT sideline
         ], dtype=np.float32)
 
-        # World coordinates (meters, Z=0 for ground)
+        # World coordinates (meters, Z=0 for ground) - corrected to match P1-P4 definitions
         world_points_3d = np.array([
-            [self.COURT_WIDTH, 0, 0],
-            [self.COURT_WIDTH, self.COURT_LENGTH, 0],
-            [0, self.COURT_LENGTH, 0],
-            [0, 0, 0]
+            [0, 0, 0],                    # P1: Left side, top (0, 0)
+            [0, self.COURT_LENGTH, 0],    # P2: Left side, bottom (0, 13.4)
+            [self.COURT_WIDTH, self.COURT_LENGTH, 0],  # P3: Right side, bottom (6.1, 13.4)
+            [self.COURT_WIDTH, 0, 0]      # P4: Right side, top (6.1, 0)
         ], dtype=np.float32)
 
         self.camera_matrix = self.estimate_camera_intrinsics()
@@ -148,18 +154,20 @@ class BadmintonCourtTracker:
 
     def calculate_homography(self) -> None:
         """Calculate homography matrix from court corners."""
+        # Image points - same corrected order as solve_camera_pose
         image_points = np.array([
-            self.court_points['P1'],
-            self.court_points['P2'],
-            self.court_points['P3'],
-            self.court_points['P4']
+            self.court_points['P1'],  # Upper baseline + LEFT sideline
+            self.court_points['P2'],  # Lower baseline + LEFT sideline
+            self.court_points['P3'],  # Lower baseline + RIGHT sideline
+            self.court_points['P4']   # Upper baseline + RIGHT sideline
         ], dtype=np.float32)
 
+        # World points - corrected to match the actual court layout
         world_points = np.array([
-            [self.COURT_WIDTH, 0],
-            [self.COURT_WIDTH, self.COURT_LENGTH],
-            [0, self.COURT_LENGTH],
-            [0, 0]
+            [0, 0],                      # P1: Left side, top (0, 0)
+            [0, self.COURT_LENGTH],      # P2: Left side, bottom (0, 13.4)
+            [self.COURT_WIDTH, self.COURT_LENGTH],  # P3: Right side, bottom (6.1, 13.4)
+            [self.COURT_WIDTH, 0]        # P4: Right side, top (6.1, 0)
         ], dtype=np.float32)
 
         self.homography_matrix, _ = cv2.findHomography(
@@ -170,6 +178,53 @@ class BadmintonCourtTracker:
             raise ValueError("Failed to calculate homography")
 
         print("Homography matrix calculated successfully")
+
+    def validate_coordinate_system(self) -> None:
+        """Validate that the coordinate system is set up correctly."""
+        print("\n=== Coordinate System Validation ===")
+
+        # Test transformation of court center
+        court_center_world = np.array([[self.COURT_WIDTH/2, self.COURT_LENGTH/2]], dtype=np.float32)
+
+        # Transform to image coordinates
+        court_center_image = cv2.perspectiveTransform(
+            court_center_world.reshape(1, 1, 2),
+            np.linalg.inv(self.homography_matrix)
+        )
+
+        print(f"Court center (world): ({self.COURT_WIDTH/2:.1f}, {self.COURT_LENGTH/2:.1f})")
+        print(f"Court center (image): ({court_center_image[0][0][0]:.1f}, {court_center_image[0][0][1]:.1f})")
+
+        # Test corners - verify homography accuracy
+        corners = ['P1', 'P2', 'P3', 'P4']
+        expected_world = [(0, 0), (0, self.COURT_LENGTH), (self.COURT_WIDTH, self.COURT_LENGTH), (self.COURT_WIDTH, 0)]
+
+        print("\nCorner validation:")
+        max_error = 0.0
+        for corner, (exp_x, exp_y) in zip(corners, expected_world):
+            image_point = np.array([[self.court_points[corner]]], dtype=np.float32)
+            world_point = cv2.perspectiveTransform(image_point, self.homography_matrix)
+            actual_x, actual_y = world_point[0][0]
+
+            error = np.sqrt((actual_x - exp_x)**2 + (actual_y - exp_y)**2)
+            max_error = max(max_error, error)
+
+            print(f"  {corner}: Expected ({exp_x:.1f}, {exp_y:.1f}), Got ({actual_x:.1f}, {actual_y:.1f}), Error: {error:.3f}m")
+
+            # Check if transformation is reasonable (within 0.5m tolerance)
+            if error > 0.5:
+                print(f"  WARNING: Large error in {corner} transformation!")
+
+        print(f"Maximum transformation error: {max_error:.3f} meters")
+
+        if max_error < 0.1:
+            print("✓ Coordinate system appears correct")
+        elif max_error < 0.5:
+            print("⚠ Coordinate system has minor errors but should work")
+        else:
+            print("✗ Coordinate system has significant errors - check court point detection")
+
+        print("=======================================\n")
 
     def transform_point_to_world(self, pixel_point: Tuple[float, float]) -> Tuple[float, float]:
         """Transform pixel point to world coordinates using homography."""
@@ -731,6 +786,47 @@ class BadmintonCourtTracker:
             max_height = max(self._hip_height_history)
             print(f"Hip height stats: avg={avg_height:.3f}m, min={min_height:.3f}m, max={max_height:.3f}m")
 
+    def detect_mirroring_issues(self) -> bool:
+        """Detect potential mirroring issues in the coordinate system."""
+        if len(self.player_positions) < 10:
+            return False
+
+        # Sample positions from different parts of the video
+        sample_size = min(50, len(self.player_positions))
+        step = len(self.player_positions) // sample_size
+        sample_positions = [self.player_positions[i] for i in range(0, len(self.player_positions), step)]
+
+        x_positions = [pos['hip_world_X'] for pos in sample_positions]
+        y_positions = [pos['hip_world_Y'] for pos in sample_positions]
+
+        # Check for clustering at extremes (potential mirroring)
+        x_min, x_max = min(x_positions), max(x_positions)
+        y_min, y_max = min(y_positions), max(y_positions)
+
+        # Check if most players are clustered on one extreme side
+        left_heavy = sum(1 for x in x_positions if x < 1.0) > len(x_positions) * 0.8
+        right_heavy = sum(1 for x in x_positions if x > 5.1) > len(x_positions) * 0.8
+        top_heavy = sum(1 for y in y_positions if y < 1.0) > len(y_positions) * 0.8
+        bottom_heavy = sum(1 for y in y_positions if y > 12.4) > len(y_positions) * 0.8
+
+        suspicious = left_heavy or right_heavy or top_heavy or bottom_heavy
+
+        if suspicious:
+            print("⚠ Potential coordinate system issues detected:")
+            print(f"  X range: {x_min:.2f} to {x_max:.2f} (court width: 0 to {self.COURT_WIDTH})")
+            print(f"  Y range: {y_min:.2f} to {y_max:.2f} (court length: 0 to {self.COURT_LENGTH})")
+            if left_heavy:
+                print("  - Most players clustered on left side")
+            if right_heavy:
+                print("  - Most players clustered on right side")
+            if top_heavy:
+                print("  - Most players clustered at top")
+            if bottom_heavy:
+                print("  - Most players clustered at bottom")
+            print("  Consider checking court point detection accuracy")
+
+        return suspicious
+
     def save_results(self) -> None:
         """Save tracking results to JSON file."""
         frames_with_players = len(set(pos['frame_index'] for pos in self.player_positions))
@@ -740,7 +836,7 @@ class BadmintonCourtTracker:
             'all_court_points': self.pose_data.get('all_court_points', self.court_points),
             'video_info': self.video_info,
             'player_positions': self.player_positions,
-            'tracking_method': "Adaptive hip height with ray-plane intersection, ankle offset correction, weighted averaging, and two-player constraint",
+            'tracking_method': "Adaptive hip height with ray-plane intersection, ankle offset correction, weighted averaging, two-player constraint, and corrected court coordinate mapping",
             'processing_info': {
                 'total_positions': len(self.player_positions),
                 'frames_with_players': frames_with_players,
@@ -752,6 +848,7 @@ class BadmintonCourtTracker:
                 'ankle_offset_correction': True,
                 'hip_offset_correction': True,
                 'two_player_constraint': True,
+                'coordinate_system_corrected': True,
                 'merge_distance_threshold_meters': self.MERGE_DISTANCE_THRESHOLD,
                 'min_frames_for_valid_player': self.MIN_FRAMES_FOR_PLAYER,
                 'original_trajectories_found': len(self._player_trajectories),
@@ -776,7 +873,9 @@ class BadmintonCourtTracker:
             self.load_pose_data()
             self.solve_camera_pose()
             self.calculate_homography()
+            self.validate_coordinate_system()  # Validate coordinate system
             self.process_all_frames()
+            self.detect_mirroring_issues()  # Check for potential issues
             self.save_results()
             print("Position tracking completed successfully!")
 

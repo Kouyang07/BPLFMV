@@ -19,6 +19,7 @@ import json
 import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
+from tqdm import tqdm
 
 def detect_best_device():
     """Auto-detect best available device."""
@@ -61,44 +62,45 @@ def detect_ml_jumps(video_path, model_path, confidence_threshold=0.5, device=Non
     frame_detections = []
     frame_number = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    # Progress bar for video processing
+    with tqdm(total=total_frames, desc="Processing video frames", unit="frame") as pbar:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        results = model(frame, conf=confidence_threshold, verbose=False)
-        detections = []
+            results = model(frame, conf=confidence_threshold, verbose=False)
+            detections = []
 
-        if len(results) > 0 and results[0].boxes is not None:
-            for box in results[0].boxes:
-                class_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                class_name = class_names.get(class_id, 'Unknown')
+            if len(results) > 0 and results[0].boxes is not None:
+                for box in results[0].boxes:
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
+                    class_name = class_names.get(class_id, 'Unknown')
 
-                # Get bounding box and bottom center
-                bbox = box.xyxy[0].cpu().numpy()
-                bottom_center_x = float((bbox[0] + bbox[2]) / 2)
-                bottom_center_y = float(bbox[3])  # Bottom edge
+                    # Get bounding box and bottom center
+                    bbox = box.xyxy[0].cpu().numpy()
+                    bottom_center_x = float((bbox[0] + bbox[2]) / 2)
+                    bottom_center_y = float(bbox[3])  # Bottom edge
 
-                detections.append({
-                    'class_name': class_name,
-                    'confidence': confidence,
-                    'frame': frame_number,
-                    'bbox': bbox.tolist(),
-                    'bottom_center_x': bottom_center_x,
-                    'bottom_center_y': bottom_center_y
-                })
+                    detections.append({
+                        'class_name': class_name,
+                        'confidence': confidence,
+                        'frame': frame_number,
+                        'bbox': bbox.tolist(),
+                        'bottom_center_x': bottom_center_x,
+                        'bottom_center_y': bottom_center_y
+                    })
 
-        frame_detections.append(detections)
-        frame_number += 1
-
-        if frame_number % 100 == 0:
-            print(f"Processed {frame_number}/{total_frames} frames")
+            frame_detections.append(detections)
+            frame_number += 1
+            pbar.update(1)
 
     cap.release()
     print(f"Finished processing {frame_number} frames")
 
     # Find valid smash frames
+    print("Analyzing smash sequences...")
     valid_smash_frames = find_valid_smash_frames(frame_detections, window_size=10)
     return valid_smash_frames, fps
 
@@ -106,10 +108,15 @@ def find_valid_smash_frames(frame_detections, window_size=10):
     """Find smash frames surrounded by forehand clear detections."""
     valid_frames = []
 
+    # Progress bar for smash analysis
+    smash_frames = []
     for frame_idx, detections in enumerate(frame_detections):
         smash_detections = [det for det in detections if det['class_name'] == 'Smash']
+        if smash_detections:
+            smash_frames.extend([(frame_idx, det) for det in smash_detections])
 
-        for smash_det in smash_detections:
+    with tqdm(smash_frames, desc="Analyzing smash sequences", unit="smash") as pbar:
+        for frame_idx, smash_det in pbar:
             start_idx = max(0, frame_idx - window_size)
             end_idx = min(len(frame_detections), frame_idx + window_size + 1)
 
@@ -264,7 +271,8 @@ def extract_player_coordinates(player_positions):
         'right_ankle_x': [], 'right_ankle_y': []
     })
 
-    for pos in player_positions:
+    print("Extracting player coordinates...")
+    for pos in tqdm(player_positions, desc="Processing player positions", unit="position"):
         player_id = pos.get('player_id')
         if player_id is None:
             continue
@@ -330,7 +338,12 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
     """Correlate ML-detected jumps with specific players using court coordinates."""
     correlations = []
 
-    for ml_jump in ml_jumps:
+    if not ml_jumps:
+        print("No ML jumps to correlate")
+        return correlations
+
+    print("Correlating ML jumps with players...")
+    for ml_jump in tqdm(ml_jumps, desc="Correlating jumps", unit="jump"):
         ml_frame = ml_jump['frame']
         ml_bottom_x = ml_jump['bottom_center_x']
         ml_bottom_y = ml_jump['bottom_center_y']
@@ -465,12 +478,23 @@ def interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame):
 
 def save_corrected_positions(original_position_data, correlations, coordinates, output_dir):
     """Save corrected position data with interpolated jump sequences."""
-    if not correlations:
-        print("No correlations to process")
-        return
-
-    # Copy original data
+    # Always copy original data first
     corrected_data = json.loads(json.dumps(original_position_data))
+
+    # Add metadata about the correction process
+    corrected_data['correction_metadata'] = {
+        'jumps_detected': len(correlations),
+        'correction_applied': len(correlations) > 0,
+        'timestamp': str(np.datetime64('now'))
+    }
+
+    if not correlations:
+        print("No correlations to process - saving original data as corrected data")
+        output_path = output_dir / "corrected_positions.json"
+        with open(output_path, 'w') as f:
+            json.dump(corrected_data, f, indent=2)
+        print(f"✅ Saved uncorrected positions to: {output_path}")
+        return
 
     # Create lookup for quick position access
     position_lookup = {}
@@ -480,7 +504,8 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
 
     total_interpolated_frames = 0
 
-    for corr in correlations:
+    print("Applying corrections...")
+    for corr in tqdm(correlations, desc="Interpolating jumps", unit="jump"):
         player_id = corr['player_id']
         begin_frame = corr['begin_frame']
         end_frame = corr['end_frame']
@@ -588,49 +613,64 @@ def main():
             timestamp = frame / fps
             print(f"  {i}. Frame {frame:4d} | Time: {timestamp:6.2f}s | Confidence: {confidence:.3f}")
 
-        if not ml_jumps:
-            print("No ML jumps detected. Exiting.")
-            return 0
-
         # Step 2: Load position data and homography
         print("\n" + "="*50)
         print("STEP 2: LOADING POSITION DATA")
         print("="*50)
 
         position_data, output_dir, homography_matrix = load_position_data(args.video_path)
-        if not position_data or homography_matrix is None:
-            print("Position data or homography unavailable.")
+        if not position_data:
+            print("❌ Position data unavailable. Cannot proceed.")
             return 1
 
         coordinates = extract_player_coordinates(position_data["player_positions"])
         print(f"Found {len(coordinates)} players with position data")
 
-        # Step 3: Court-based player matching
+        # Step 3: Court-based player matching (only if we have both ML jumps and homography)
+        correlations = []
+        if ml_jumps and homography_matrix is not None:
+            print("\n" + "="*50)
+            print("STEP 3: COURT-BASED PLAYER MATCHING")
+            print("="*50)
+
+            correlations = correlate_ml_jumps_with_players(
+                ml_jumps, coordinates, position_data, homography_matrix,
+                args.proximity, args.court_distance
+            )
+
+            print(f"\n📊 CORRELATION SUMMARY")
+            print(f"Found {len(correlations)} valid correlations:")
+            for i, corr in enumerate(correlations, 1):
+                print(f"  {i}. Player {corr['player_id']} | "
+                      f"ML: Frame {corr['ml_frame']} | "
+                      f"Sequence: {corr['begin_frame']}→{corr['jump_frame']}→{corr['end_frame']} | "
+                      f"Court dist: {corr['court_distance']:.2f}m")
+        else:
+            if not ml_jumps:
+                print("\n⚠️  No ML jumps detected - skipping correlation step")
+            if homography_matrix is None:
+                print("\n⚠️  No homography matrix available - skipping correlation step")
+
+        # Step 4: Always save corrected positions (even if no corrections applied)
         print("\n" + "="*50)
-        print("STEP 3: COURT-BASED PLAYER MATCHING")
+        print("STEP 4: SAVING CORRECTED POSITIONS")
         print("="*50)
 
-        correlations = correlate_ml_jumps_with_players(
-            ml_jumps, coordinates, position_data, homography_matrix,
-            args.proximity, args.court_distance
-        )
+        save_corrected_positions(position_data, correlations, coordinates, output_dir)
 
-        print(f"\n📊 CORRELATION SUMMARY")
-        print(f"Found {len(correlations)} valid correlations:")
-        for i, corr in enumerate(correlations, 1):
-            print(f"  {i}. Player {corr['player_id']} | "
-                  f"ML: Frame {corr['ml_frame']} | "
-                  f"Sequence: {corr['begin_frame']}→{corr['jump_frame']}→{corr['end_frame']} | "
-                  f"Court dist: {corr['court_distance']:.2f}m")
+        # Summary
+        print("\n" + "="*50)
+        print("PROCESSING COMPLETE")
+        print("="*50)
 
-        # Step 4: Save corrected positions
         if correlations:
-            print("\n" + "="*50)
-            print("STEP 4: SAVING CORRECTED POSITIONS")
-            print("="*50)
-            save_corrected_positions(position_data, correlations, coordinates, output_dir)
+            print(f"✅ Successfully processed {len(ml_jumps)} ML detections")
+            print(f"✅ Applied {len(correlations)} jump corrections")
+            print(f"✅ Corrected positions saved to: {output_dir / 'corrected_positions.json'}")
         else:
-            print("\n❌ No valid correlations found.")
+            print(f"ℹ️  Processed {len(ml_jumps)} ML detections")
+            print(f"ℹ️  No corrections applied (no valid correlations found)")
+            print(f"✅ Original positions saved as corrected data to: {output_dir / 'corrected_positions.json'}")
 
         return 0
 
