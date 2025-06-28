@@ -70,7 +70,7 @@ class TrackingEvaluator:
 
     def load_ground_truth(self) -> bool:
         """Load ground truth annotations."""
-        ground_truth_file = self.results_dir / "ground_truth_positions.json"
+        ground_truth_file = self.results_dir / "video_click_ground_truth.json"
 
         if ground_truth_file.exists():
             try:

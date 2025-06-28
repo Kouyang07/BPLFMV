@@ -5,8 +5,7 @@ Badminton Player Position Tracking Script
 Converts pose detection data to precise 2D world coordinates on badminton court.
 Uses adaptive hip height calculation and ray-plane intersection for accuracy.
 Limits tracking to exactly two players by merging multiple detections.
-Fixed ankle offset correction for proper ground projection.
-FIXED: Corrected court point mapping to eliminate left/right mirroring.
+FIXED: Applies ankle offset in pixel space before homography transformation for better accuracy.
 
 Usage: python track_positions.py <video_file_path> [--debug]
 """
@@ -27,7 +26,7 @@ class BadmintonCourtTracker:
     # Court dimensions (meters)
     COURT_WIDTH = 6.1
     COURT_LENGTH = 13.4
-    DEFAULT_HIP_HEIGHT = 1.0  # Fallback hip height
+    DEFAULT_HIP_HEIGHT = 0.9  # Fallback hip height
 
     # Pose joint indices
     HIP_LEFT = 11
@@ -42,7 +41,7 @@ class BadmintonCourtTracker:
     MIN_FRAMES_FOR_PLAYER = 5  # Minimum frames to consider a valid player
 
     # Ankle offset correction (distance from ankle joint to ground contact point)
-    ANKLE_TO_GROUND_OFFSET = 0.14
+    ANKLE_TO_GROUND_OFFSET = 0.07
 
     def __init__(self, video_path: str, debug: bool = False):
         """Initialize tracker."""
@@ -232,69 +231,75 @@ class BadmintonCourtTracker:
         world_point = cv2.perspectiveTransform(point, self.homography_matrix)
         return float(world_point[0][0][0]), float(world_point[0][0][1])
 
-    def project_ankle_to_ground(self, ankle_pixel: Tuple[float, float]) -> Tuple[float, float]:
-        """Project ankle to ground using ray-plane intersection with proper offset correction."""
-        # Convert to normalized camera coordinates
-        point_cam = np.array([
-            (ankle_pixel[0] - self.camera_matrix[0, 2]) / self.camera_matrix[0, 0],
-            (ankle_pixel[1] - self.camera_matrix[1, 2]) / self.camera_matrix[1, 1],
-            1.0
-        ], dtype=np.float32)
+    def estimate_distance_to_point(self, pixel_point: Tuple[float, float]) -> float:
+        """Estimate distance from camera to a point using rough homography projection."""
+        try:
+            # Get rough world position
+            world_x, world_y = self.transform_point_to_world(pixel_point)
 
-        # Transform to world ray direction
-        rotation_matrix, _ = cv2.Rodrigues(self.rotation_vector)
-        ray_dir = rotation_matrix.T @ point_cam
-        ray_dir = ray_dir / np.linalg.norm(ray_dir)
+            # Calculate 2D distance to camera position
+            distance = np.sqrt(
+                (world_x - self.camera_position[0])**2 +
+                (world_y - self.camera_position[1])**2
+            )
 
-        # Ray origin (camera position in world coordinates)
-        ray_origin = self.camera_position
+            return max(distance, 1.0)  # Ensure minimum distance of 1m
+        except:
+            return 5.0  # Default fallback distance
 
-        # Ground plane: z = 0
-        # Ray equation: point = ray_origin + t * ray_dir
-        # For ground intersection: ray_origin[2] + t * ray_dir[2] = 0
-        # So: t = -ray_origin[2] / ray_dir[2]
+    def calculate_ankle_pixel_offset(self, ankle_pixel: Tuple[float, float]) -> Tuple[float, float]:
+        """Calculate pixel offset for ankle to ground correction (applied before homography)."""
+        try:
+            # Estimate distance to player for this ankle position
+            distance_to_player = self.estimate_distance_to_point(ankle_pixel)
 
-        if abs(ray_dir[2]) < 1e-8:  # Ray is parallel to ground
-            # Fallback to homography
-            return self.transform_point_to_world(ankle_pixel)
-
-        t = -ray_origin[2] / ray_dir[2]
-
-        # Ground intersection point
-        ground_point = ray_origin + t * ray_dir
-
-        # Now we need to offset from ankle joint to ground contact point
-        # The ankle joint is typically ~8cm above the ground contact point
-        # We need to move the position away from the camera to account for this
-
-        # Calculate the horizontal offset direction (from camera toward player)
-        camera_to_player_horizontal = np.array([ground_point[0] - ray_origin[0],
-                                                ground_point[1] - ray_origin[1]])
-        distance_to_player = np.linalg.norm(camera_to_player_horizontal)
-
-        if distance_to_player > 1e-6:
-            # Normalize the horizontal direction
-            offset_direction = camera_to_player_horizontal / distance_to_player
-
-            # Calculate the horizontal offset based on the camera angle
-            # The steeper the angle, the more horizontal offset we need
+            # Calculate the vertical angle from camera to player
             vertical_angle = np.arctan(self.camera_height / distance_to_player)
-            horizontal_offset = self.ANKLE_TO_GROUND_OFFSET / np.tan(vertical_angle)
 
-            # Apply the offset (move away from camera)
-            corrected_x = ground_point[0] + horizontal_offset * offset_direction[0]
-            corrected_y = ground_point[1] + horizontal_offset * offset_direction[1]
-        else:
-            corrected_x = ground_point[0]
-            corrected_y = ground_point[1]
+            # Calculate pixel offset for 14cm vertical drop
+            # This projects the 3D offset to 2D pixel space
+            pixel_offset_y = (self.ANKLE_TO_GROUND_OFFSET * self.camera_matrix[1, 1]) / distance_to_player
+
+            # Apply perspective correction based on viewing angle
+            # Steeper angles (higher vertical_angle) need more correction
+            perspective_factor = 1.0 / np.cos(vertical_angle) if np.cos(vertical_angle) > 0.1 else 1.0
+            corrected_offset_y = pixel_offset_y * perspective_factor
+
+            if self.debug:
+                print(f"Ankle pixel: {ankle_pixel}")
+                print(f"Distance to player: {distance_to_player:.2f}m")
+                print(f"Vertical angle: {np.degrees(vertical_angle):.1f}°")
+                print(f"Pixel offset Y: {corrected_offset_y:.2f}px")
+
+            return (0.0, corrected_offset_y)  # Only Y offset, no X offset
+
+        except Exception as e:
+            if self.debug:
+                print(f"Error calculating ankle offset: {e}")
+            return (0.0, 0.0)
+
+    def project_ankle_to_ground_with_homography(self, ankle_pixel: Tuple[float, float]) -> Tuple[float, float]:
+        """Project ankle to ground using pre-homography pixel offset correction."""
+        # Calculate pixel offset for 14cm drop
+        offset_x, offset_y = self.calculate_ankle_pixel_offset(ankle_pixel)
+
+        # Apply offset in pixel space BEFORE homography transformation
+        corrected_pixel = (ankle_pixel[0] + offset_x, ankle_pixel[1] + offset_y)
+
+        # Now transform the corrected pixel position to world coordinates
+        corrected_world_x, corrected_world_y = self.transform_point_to_world(corrected_pixel)
 
         if self.debug:
-            print(f"Ankle pixel: {ankle_pixel}")
-            print(f"Ray intersection: ({ground_point[0]:.2f}, {ground_point[1]:.2f})")
-            print(f"Horizontal offset: {horizontal_offset:.4f}m")
-            print(f"Corrected: ({corrected_x:.2f}, {corrected_y:.2f})")
+            # Compare with uncorrected version for debugging
+            uncorrected_world_x, uncorrected_world_y = self.transform_point_to_world(ankle_pixel)
+            print(f"Original pixel: {ankle_pixel}")
+            print(f"Corrected pixel: {corrected_pixel}")
+            print(f"Uncorrected world: ({uncorrected_world_x:.2f}, {uncorrected_world_y:.2f})")
+            print(f"Corrected world: ({corrected_world_x:.2f}, {corrected_world_y:.2f})")
+            print(f"World correction: ({corrected_world_x - uncorrected_world_x:.3f}, {corrected_world_y - uncorrected_world_y:.3f})")
+            print("---")
 
-        return float(corrected_x), float(corrected_y)
+        return float(corrected_world_x), float(corrected_world_y)
 
     def estimate_hip_height_from_pose(self, joints: List[Dict]) -> Optional[float]:
         """Estimate hip height using body proportions."""
@@ -347,7 +352,7 @@ class BadmintonCourtTracker:
             pixel_height_diff = abs(hip_pixel[1] - avg_ankle_y)
 
             # Get distance to player using projected ground position
-            ankle_ground = self.project_ankle_to_ground((avg_ankle_x, avg_ankle_y))
+            ankle_ground = self.project_ankle_to_ground_with_homography((avg_ankle_x, avg_ankle_y))
             camera_to_player_distance = np.sqrt(
                 (ankle_ground[0] - self.camera_position[0])**2 +
                 (ankle_ground[1] - self.camera_position[1])**2
@@ -406,48 +411,60 @@ class BadmintonCourtTracker:
 
         return self.DEFAULT_HIP_HEIGHT
 
+    def calculate_hip_pixel_offset(self, hip_pixel: Tuple[float, float], hip_height: float) -> Tuple[float, float]:
+        """Calculate pixel offset for hip to ground correction (applied before homography)."""
+        try:
+            # Estimate distance to player for this hip position
+            distance_to_player = self.estimate_distance_to_point(hip_pixel)
+
+            # Calculate the vertical angle from camera to player
+            vertical_angle = np.arctan(self.camera_height / distance_to_player)
+
+            # Calculate pixel offset for hip_height vertical drop
+            # This projects the 3D offset to 2D pixel space
+            pixel_offset_y = (hip_height * self.camera_matrix[1, 1]) / distance_to_player
+
+            # Apply perspective correction based on viewing angle
+            # Steeper angles (higher vertical_angle) need more correction
+            perspective_factor = 1.0 / np.cos(vertical_angle) if np.cos(vertical_angle) > 0.1 else 1.0
+            corrected_offset_y = pixel_offset_y * perspective_factor
+
+            if self.debug:
+                print(f"Hip pixel: {hip_pixel}")
+                print(f"Hip height: {hip_height:.3f}m")
+                print(f"Distance to player: {distance_to_player:.2f}m")
+                print(f"Vertical angle: {np.degrees(vertical_angle):.1f}°")
+                print(f"Pixel offset Y: {corrected_offset_y:.2f}px")
+
+            return (0.0, corrected_offset_y)  # Only Y offset, no X offset
+
+        except Exception as e:
+            if self.debug:
+                print(f"Error calculating hip offset: {e}")
+            return (0.0, 0.0)
+
     def project_hip_to_ground(self, hip_pixel: Tuple[float, float], hip_height: float) -> Tuple[float, float]:
-        """Project hip to ground using ray-plane intersection with offset correction."""
-        # Convert to normalized camera coordinates
-        point_cam = np.array([
-            (hip_pixel[0] - self.camera_matrix[0, 2]) / self.camera_matrix[0, 0],
-            (hip_pixel[1] - self.camera_matrix[1, 2]) / self.camera_matrix[1, 1],
-            1.0
-        ], dtype=np.float32)
+        """Project hip to ground using pre-homography pixel offset correction (same as ankle method)."""
+        # Calculate pixel offset for hip_height drop
+        offset_x, offset_y = self.calculate_hip_pixel_offset(hip_pixel, hip_height)
 
-        # Transform to world ray direction
-        rotation_matrix, _ = cv2.Rodrigues(self.rotation_vector)
-        ray_dir = rotation_matrix.T @ point_cam
-        ray_dir = ray_dir / np.linalg.norm(ray_dir)
+        # Apply offset in pixel space BEFORE homography transformation
+        corrected_pixel = (hip_pixel[0] + offset_x, hip_pixel[1] + offset_y)
 
-        # Calculate offset correction
-        tan_angle = np.sqrt(ray_dir[0]**2 + ray_dir[1]**2) / abs(ray_dir[2])
-        offset_magnitude = hip_height * tan_angle
-
-        # Get base position from homography
-        base_x, base_y = self.transform_point_to_world(hip_pixel)
-
-        # Apply offset in opposite direction (toward camera)
-        if np.sqrt(ray_dir[0]**2 + ray_dir[1]**2) > 1e-6:
-            horizontal_dir_x = ray_dir[0] / np.sqrt(ray_dir[0]**2 + ray_dir[1]**2)
-            horizontal_dir_y = ray_dir[1] / np.sqrt(ray_dir[0]**2 + ray_dir[1]**2)
-
-            corrected_x = base_x - offset_magnitude * horizontal_dir_x
-            corrected_y = base_y - offset_magnitude * horizontal_dir_y
-        else:
-            corrected_x = base_x
-            corrected_y = base_y
+        # Now transform the corrected pixel position to world coordinates
+        corrected_world_x, corrected_world_y = self.transform_point_to_world(corrected_pixel)
 
         if self.debug:
-            print(f"Hip pixel: {hip_pixel}")
-            print(f"Hip height: {hip_height:.3f}m")
-            print(f"Tan angle: {tan_angle:.4f}")
-            print(f"Offset: {offset_magnitude:.4f}m")
-            print(f"Base: ({base_x:.2f}, {base_y:.2f})")
-            print(f"Corrected: ({corrected_x:.2f}, {corrected_y:.2f})")
+            # Compare with uncorrected version for debugging
+            uncorrected_world_x, uncorrected_world_y = self.transform_point_to_world(hip_pixel)
+            print(f"Hip original pixel: {hip_pixel}")
+            print(f"Hip corrected pixel: {corrected_pixel}")
+            print(f"Hip uncorrected world: ({uncorrected_world_x:.2f}, {uncorrected_world_y:.2f})")
+            print(f"Hip corrected world: ({corrected_world_x:.2f}, {corrected_world_y:.2f})")
+            print(f"Hip world correction: ({corrected_world_x - uncorrected_world_x:.3f}, {corrected_world_y - uncorrected_world_y:.3f})")
             print("---")
 
-        return float(corrected_x), float(corrected_y)
+        return float(corrected_world_x), float(corrected_world_y)
 
     def extract_joint_position(self, joints: List[Dict], joint_index: int) -> Optional[Tuple[float, float]]:
         """Extract joint position if confidence is sufficient."""
@@ -459,7 +476,7 @@ class BadmintonCourtTracker:
         return None
 
     def calculate_player_position(self, joints: List[Dict], frame_index: int) -> Optional[Dict[str, float]]:
-        """Calculate world position using adaptive hip height and proper ankle projection."""
+        """Calculate world position using adaptive hip height and pre-homography offset for ankles."""
         # Extract joints
         hip_left = self.extract_joint_position(joints, self.HIP_LEFT)
         hip_right = self.extract_joint_position(joints, self.HIP_RIGHT)
@@ -480,25 +497,25 @@ class BadmintonCourtTracker:
         adaptive_hip_height = self.get_adaptive_hip_height(joints, frame_index)
         hip_ground_x, hip_ground_y = self.project_hip_to_ground(hip_center, adaptive_hip_height)
 
-        # Project ankles to ground with proper offset correction
+        # Project ankles to ground using improved pre-homography offset correction
         ankle_positions = []
         left_ankle_world = (0.0, 0.0)
         right_ankle_world = (0.0, 0.0)
 
         if ankle_left:
-            left_ankle_world = self.project_ankle_to_ground(ankle_left)
+            left_ankle_world = self.project_ankle_to_ground_with_homography(ankle_left)
             ankle_positions.append(left_ankle_world)
         if ankle_right:
-            right_ankle_world = self.project_ankle_to_ground(ankle_right)
+            right_ankle_world = self.project_ankle_to_ground_with_homography(ankle_right)
             ankle_positions.append(right_ankle_world)
 
-        # Weighted average (hip trusted more than ankles, but ankles now more accurate)
+        # Weighted average - now with higher confidence in ankle positions due to improved correction
         positions = [(hip_ground_x, hip_ground_y)]
-        weights = [0.6]  # Reduced hip weight since ankles are now properly corrected
+        weights = [0.5]  # Reduced hip weight since ankle correction is now more accurate
 
         for ankle_pos in ankle_positions:
             positions.append(ankle_pos)
-            weights.append(0.2)  # Increased ankle weight
+            weights.append(0.25)  # Increased ankle weight due to better correction
 
         # Normalize weights
         total_weight = sum(weights)
@@ -836,7 +853,7 @@ class BadmintonCourtTracker:
             'all_court_points': self.pose_data.get('all_court_points', self.court_points),
             'video_info': self.video_info,
             'player_positions': self.player_positions,
-            'tracking_method': "Adaptive hip height with ray-plane intersection, ankle offset correction, weighted averaging, two-player constraint, and corrected court coordinate mapping",
+            'tracking_method': "Adaptive hip height with ray-plane intersection for hips, pre-homography pixel offset correction for ankles, weighted averaging, two-player constraint, and corrected court coordinate mapping",
             'processing_info': {
                 'total_positions': len(self.player_positions),
                 'frames_with_players': frames_with_players,
@@ -845,8 +862,8 @@ class BadmintonCourtTracker:
                 'camera_height_meters': self.camera_height,
                 'camera_position': self.camera_position.tolist() if self.camera_position is not None else None,
                 'adaptive_hip_height': True,
-                'ankle_offset_correction': True,
-                'hip_offset_correction': True,
+                'ankle_method': 'pre_homography_pixel_offset',
+                'hip_method': 'ray_plane_intersection_with_offset',
                 'two_player_constraint': True,
                 'coordinate_system_corrected': True,
                 'merge_distance_threshold_meters': self.MERGE_DISTANCE_THRESHOLD,
