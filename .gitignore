@@ -13,6 +13,7 @@
 !evaluation/**
 !evaluation/
 !install_dependencies.sh
+!pipeline.py
 
 # Don't ignore .gitignore itself
 !.gitignore
