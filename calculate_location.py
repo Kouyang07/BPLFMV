@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Badminton Player Position Tracking Script - Improved Version
+Badminton Player Position Tracking Script - Enhanced Version with Orientation Correction
 
 Converts pose detection data to precise 2D world coordinates on badminton court.
 Uses ankle-prioritized positioning with adaptive hip height as supplementary data.
-Enhanced robustness and accuracy with dynamic frame windowing.
+Enhanced robustness and accuracy with dynamic frame windowing and automatic orientation correction.
 
 Usage: python track_positions.py <video_file_path> [--debug]
 """
@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 
 
 class BadmintonCourtTracker:
-    """Tracks player positions on badminton court using ankle-prioritized method."""
+    """Tracks player positions on badminton court using ankle-prioritized method with orientation correction."""
 
     # Court dimensions (meters)
     COURT_WIDTH = 6.1
@@ -68,6 +68,7 @@ class BadmintonCourtTracker:
         self.rotation_vector = None
         self.translation_vector = None
         self.player_positions = []
+        self.orientation_corrected = False
 
         # Enhanced tracking with dynamic windowing
         self._hip_height_history = deque(maxlen=self.MAX_WINDOW_SIZE)
@@ -121,20 +122,20 @@ class BadmintonCourtTracker:
 
     def solve_camera_pose(self) -> None:
         """Determine camera position and height using solvePnP."""
-        # Image points (pixels)
+        # Image points (pixels) - now guaranteed to be in standardized order
         image_points = np.array([
-            self.court_points['P1'],  # Upper baseline + LEFT sideline
-            self.court_points['P2'],  # Lower baseline + LEFT sideline
-            self.court_points['P3'],  # Lower baseline + RIGHT sideline
-            self.court_points['P4']   # Upper baseline + RIGHT sideline
+            self.court_points['P1'],  # Top-left
+            self.court_points['P2'],  # Bottom-left
+            self.court_points['P3'],  # Bottom-right
+            self.court_points['P4']   # Top-right
         ], dtype=np.float32)
 
-        # World coordinates (meters, Z=0 for ground)
+        # World coordinates (meters, Z=0 for ground) - corresponding to standardized order
         world_points_3d = np.array([
-            [0, 0, 0],                    # P1: Left side, top (0, 0)
-            [0, self.COURT_LENGTH, 0],    # P2: Left side, bottom (0, 13.4)
-            [self.COURT_WIDTH, self.COURT_LENGTH, 0],  # P3: Right side, bottom (6.1, 13.4)
-            [self.COURT_WIDTH, 0, 0]      # P4: Right side, top (6.1, 0)
+            [0, 0, 0],                    # P1: Top-left (0, 0)
+            [0, self.COURT_LENGTH, 0],    # P2: Bottom-left (0, 13.4)
+            [self.COURT_WIDTH, self.COURT_LENGTH, 0],  # P3: Bottom-right (6.1, 13.4)
+            [self.COURT_WIDTH, 0, 0]      # P4: Top-right (6.1, 0)
         ], dtype=np.float32)
 
         self.camera_matrix = self.estimate_camera_intrinsics()
@@ -159,22 +160,93 @@ class BadmintonCourtTracker:
         print(f"Camera height: {self.camera_height:.2f} meters")
         print(f"Camera position: X={self.camera_position[0]:.2f}, Y={self.camera_position[1]:.2f}")
 
+    def standardize_court_point_order(self) -> None:
+        """Standardize court points to clockwise order 1,4,3,2 from top-left."""
+        print("\n=== Court Point Order Standardization ===")
+
+        # Extract all four points
+        points = {
+            'P1': self.court_points['P1'],
+            'P2': self.court_points['P2'],
+            'P3': self.court_points['P3'],
+            'P4': self.court_points['P4']
+        }
+
+        if self.debug:
+            print("Original points:")
+            for name, point in points.items():
+                print(f"  {name}: ({point[0]:.1f}, {point[1]:.1f})")
+
+        # Convert to list of (x, y, original_name) for analysis
+        point_data = [(point[0], point[1], name) for name, point in points.items()]
+
+        # Find corners based on spatial relationships
+        # Sort by Y coordinate first (top vs bottom)
+        point_data.sort(key=lambda p: p[1])
+
+        # Split into top two and bottom two points
+        top_points = point_data[:2]
+        bottom_points = point_data[2:]
+
+        # Within each pair, sort by X coordinate (left vs right)
+        top_points.sort(key=lambda p: p[0])  # Left to right
+        bottom_points.sort(key=lambda p: p[0])  # Left to right
+
+        # Assign based on clockwise order from top-left: 1(TL), 4(TR), 3(BR), 2(BL)
+        top_left = top_points[0]      # P1: Top-left
+        top_right = top_points[1]     # P4: Top-right
+        bottom_left = bottom_points[0]  # P2: Bottom-left
+        bottom_right = bottom_points[1] # P3: Bottom-right
+
+        # Create the standardized mapping
+        standardized_points = {
+            'P1': [top_left[0], top_left[1]],      # Top-left
+            'P2': [bottom_left[0], bottom_left[1]], # Bottom-left
+            'P3': [bottom_right[0], bottom_right[1]], # Bottom-right
+            'P4': [top_right[0], top_right[1]]     # Top-right
+        }
+
+        # Check if reordering was needed
+        original_order = [points['P1'], points['P2'], points['P3'], points['P4']]
+        new_order = [standardized_points['P1'], standardized_points['P2'],
+                     standardized_points['P3'], standardized_points['P4']]
+
+        reordering_needed = not all(
+            abs(orig[0] - new[0]) < 1 and abs(orig[1] - new[1]) < 1
+            for orig, new in zip(original_order, new_order)
+        )
+
+        if reordering_needed:
+            print("🔄 Court point reordering detected and applied:")
+            print(f"  Original P1 ({points['P1'][0]:.1f}, {points['P1'][1]:.1f}) -> New P1 ({standardized_points['P1'][0]:.1f}, {standardized_points['P1'][1]:.1f}) [{top_left[2]}]")
+            print(f"  Original P2 ({points['P2'][0]:.1f}, {points['P2'][1]:.1f}) -> New P2 ({standardized_points['P2'][0]:.1f}, {standardized_points['P2'][1]:.1f}) [{bottom_left[2]}]")
+            print(f"  Original P3 ({points['P3'][0]:.1f}, {points['P3'][1]:.1f}) -> New P3 ({standardized_points['P3'][0]:.1f}, {standardized_points['P3'][1]:.1f}) [{bottom_right[2]}]")
+            print(f"  Original P4 ({points['P4'][0]:.1f}, {points['P4'][1]:.1f}) -> New P4 ({standardized_points['P4'][0]:.1f}, {standardized_points['P4'][1]:.1f}) [{top_right[2]}]")
+
+            # Update the court points
+            self.court_points = standardized_points
+        else:
+            print("✓ Court points are already in correct clockwise order (1,4,3,2 from top-left)")
+
+        print("Standardized clockwise order: P1(TL) -> P4(TR) -> P3(BR) -> P2(BL)")
+        print("==========================================\n")
+
     def calculate_homography(self) -> None:
         """Calculate homography matrix from court corners."""
-        # Image points
+        # Image points (now guaranteed to be in correct order)
         image_points = np.array([
-            self.court_points['P1'],
-            self.court_points['P2'],
-            self.court_points['P3'],
-            self.court_points['P4']
+            self.court_points['P1'],  # Top-left
+            self.court_points['P2'],  # Bottom-left
+            self.court_points['P3'],  # Bottom-right
+            self.court_points['P4']   # Top-right
         ], dtype=np.float32)
 
-        # World points
+        # World points (corresponding to the standardized image points)
         world_points = np.array([
-            [0, 0],
-            [0, self.COURT_LENGTH],
-            [self.COURT_WIDTH, self.COURT_LENGTH],
-            [self.COURT_WIDTH, 0]
+            [0, 0],                    # P1: Top-left (0, 0)
+            [0, self.COURT_LENGTH],    # P2: Bottom-left (0, 13.4)
+            [self.COURT_WIDTH, self.COURT_LENGTH],  # P3: Bottom-right (6.1, 13.4)
+            [self.COURT_WIDTH, 0]      # P4: Top-right (6.1, 0)
         ], dtype=np.float32)
 
         self.homography_matrix, _ = cv2.findHomography(
@@ -186,15 +258,86 @@ class BadmintonCourtTracker:
 
         print("Homography matrix calculated successfully")
 
+    def auto_correct_orientation(self) -> None:
+        """Automatically detect and correct court orientation to prevent mirroring."""
+        print("\n=== Court Orientation Analysis ===")
+
+        # Test all four corners to understand the mapping
+        corners = ['P1', 'P2', 'P3', 'P4']
+        world_coords = []
+
+        for corner in corners:
+            image_point = np.array([[self.court_points[corner]]], dtype=np.float32)
+            world_point = cv2.perspectiveTransform(image_point, self.homography_matrix)
+            world_x, world_y = world_point[0][0]
+            world_coords.append((world_x, world_y))
+
+            if self.debug:
+                print(f"{corner}: Image({self.court_points[corner]}) -> World({world_x:.2f}, {world_y:.2f})")
+
+        # Check if the coordinate system is consistent with our expected layout
+        # P1 should be near (0,0), P2 near (0,13.4), P3 near (6.1,13.4), P4 near (6.1,0)
+        p1_x, p1_y = world_coords[0]
+        p3_x, p3_y = world_coords[2]
+
+        # Calculate center of left edge (P1-P2) and right edge (P3-P4)
+        left_edge_x = (world_coords[0][0] + world_coords[1][0]) / 2
+        right_edge_x = (world_coords[2][0] + world_coords[3][0]) / 2
+
+        # Check if orientation needs correction
+        needs_x_flip = right_edge_x < left_edge_x
+
+        # Also check Y orientation
+        top_edge_y = (world_coords[0][1] + world_coords[3][1]) / 2
+        bottom_edge_y = (world_coords[1][1] + world_coords[2][1]) / 2
+        needs_y_flip = bottom_edge_y < top_edge_y
+
+        print(f"Left edge X: {left_edge_x:.2f}, Right edge X: {right_edge_x:.2f}")
+        print(f"Top edge Y: {top_edge_y:.2f}, Bottom edge Y: {bottom_edge_y:.2f}")
+        print(f"Needs X flip: {needs_x_flip}, Needs Y flip: {needs_y_flip}")
+
+        if needs_x_flip or needs_y_flip:
+            print("🔄 Detected incorrect court orientation - applying correction")
+
+            # Create transformation matrix to fix orientation
+            flip_x = -1 if needs_x_flip else 1
+            flip_y = -1 if needs_y_flip else 1
+            offset_x = self.COURT_WIDTH if needs_x_flip else 0
+            offset_y = self.COURT_LENGTH if needs_y_flip else 0
+
+            flip_transform = np.array([
+                [flip_x, 0, offset_x],
+                [0, flip_y, offset_y],
+                [0, 0, 1]
+            ], dtype=np.float32)
+
+            # Apply correction to homography
+            self.homography_matrix = flip_transform @ self.homography_matrix
+
+            # Update camera position if needed
+            if self.camera_position is not None:
+                if needs_x_flip:
+                    self.camera_position[0] = self.COURT_WIDTH - self.camera_position[0]
+                if needs_y_flip:
+                    self.camera_position[1] = self.COURT_LENGTH - self.camera_position[1]
+
+            self.orientation_corrected = True
+            print(f"✓ Orientation corrected - Camera position updated to: X={self.camera_position[0]:.2f}, Y={self.camera_position[1]:.2f}")
+        else:
+            print("✓ Court orientation is correct - no adjustment needed")
+
+        print("=====================================\n")
+
     def validate_coordinate_system(self) -> None:
-        """Validate coordinate system accuracy."""
+        """Validate coordinate system accuracy after standardization and orientation correction."""
         print("\n=== Coordinate System Validation ===")
 
         corners = ['P1', 'P2', 'P3', 'P4']
         expected_world = [(0, 0), (0, self.COURT_LENGTH), (self.COURT_WIDTH, self.COURT_LENGTH), (self.COURT_WIDTH, 0)]
+        corner_names = ['Top-Left', 'Bottom-Left', 'Bottom-Right', 'Top-Right']
 
         max_error = 0.0
-        for corner, (exp_x, exp_y) in zip(corners, expected_world):
+        for corner, (exp_x, exp_y), name in zip(corners, expected_world, corner_names):
             image_point = np.array([[self.court_points[corner]]], dtype=np.float32)
             world_point = cv2.perspectiveTransform(image_point, self.homography_matrix)
             actual_x, actual_y = world_point[0][0]
@@ -202,9 +345,14 @@ class BadmintonCourtTracker:
             error = np.sqrt((actual_x - exp_x)**2 + (actual_y - exp_y)**2)
             max_error = max(max_error, error)
 
-            print(f"  {corner}: Expected ({exp_x:.1f}, {exp_y:.1f}), Got ({actual_x:.1f}, {actual_y:.1f}), Error: {error:.3f}m")
+            print(f"  {corner} ({name}): Expected ({exp_x:.1f}, {exp_y:.1f}), Got ({actual_x:.1f}, {actual_y:.1f}), Error: {error:.3f}m")
 
         print(f"Maximum transformation error: {max_error:.3f} meters")
+
+        print("📝 Applied corrections:")
+        print("   - Court point order standardized to clockwise: P1(TL) -> P4(TR) -> P3(BR) -> P2(BL)")
+        if self.orientation_corrected:
+            print("   - Coordinate system orientation automatically corrected")
 
         if max_error < 0.15:
             print("✓ Coordinate system validation passed")
@@ -743,6 +891,9 @@ class BadmintonCourtTracker:
         print(f"Y range: {min(y_positions):.2f} to {max(y_positions):.2f}m")
         print(f"Out of bounds: {out_of_bounds_ratio:.1%}")
 
+        if self.orientation_corrected:
+            print("📝 Note: Coordinate system orientation was automatically corrected")
+
         if out_of_bounds_ratio > 0.1:
             print("⚠ High out-of-bounds ratio detected - check calibration")
         else:
@@ -758,19 +909,22 @@ class BadmintonCourtTracker:
             'all_court_points': self.pose_data.get('all_court_points', self.court_points),
             'video_info': self.video_info,
             'player_positions': self.player_positions,
-            'tracking_method': "Ankle-prioritized positioning with adaptive hip height supplementation, dynamic frame windowing, pre-homography pixel offset correction, and enhanced two-player constraint system",
+            'tracking_method': "Ankle-prioritized positioning with adaptive hip height supplementation, dynamic frame windowing, pre-homography pixel offset correction, enhanced two-player constraint system, court point order standardization, and automatic orientation correction",
             'processing_info': {
                 'total_positions': len(self.player_positions),
                 'frames_with_players': frames_with_players,
                 'ankle_to_ground_offset_meters': self.ANKLE_TO_GROUND_OFFSET,
                 'camera_height_meters': self.camera_height,
                 'camera_position': self.camera_position.tolist() if self.camera_position is not None else None,
+                'orientation_corrected': self.orientation_corrected,
                 'enhanced_features': {
                     'ankle_prioritized_weighting': True,
                     'dynamic_frame_windowing': True,
                     'adaptive_hip_height': True,
                     'motion_based_windowing': True,
-                    'boundary_validation': True
+                    'boundary_validation': True,
+                    'automatic_orientation_correction': True,
+                    'court_point_order_standardization': True
                 },
                 'weighting_scheme': {
                     'ankle_weight': 0.4,
@@ -792,14 +946,19 @@ class BadmintonCourtTracker:
         print(f"Total positions: {len(self.player_positions)}")
         print(f"Frames with players: {frames_with_players}")
 
+        if self.orientation_corrected:
+            print("🔄 Orientation correction was applied to prevent mirroring")
+
     def run(self) -> None:
-        """Run the complete tracking pipeline."""
+        """Run the complete tracking pipeline with point standardization and orientation correction."""
         print(f"Starting enhanced position tracking for: {self.video_name}")
 
         try:
             self.load_pose_data()
+            self.standardize_court_point_order()  # NEW: Standardize point ordering first
             self.solve_camera_pose()
             self.calculate_homography()
+            self.auto_correct_orientation()  # Automatic orientation correction
             self.validate_coordinate_system()
             self.process_all_frames()
             self.detect_potential_issues()
