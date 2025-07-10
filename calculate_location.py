@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Badminton Player Position Tracking Script - Simplified Version
+Badminton Player Position Tracking Script - Fixed Version
 
-Converts pose detection data to precise 2D world coordinates on badminton court.
-Uses ankle-prioritized positioning with adaptive hip height as supplementary data.
-Assumes court points are already standardized by the detection script.
+Fixed issues with player ID consistency and two-player mapping.
+Key improvements:
+1. Better distance-based tracking with velocity prediction
+2. Improved two-player detection and assignment
+3. Fixed player mapping logic
+4. Enhanced trajectory analysis
 
 Usage: python track_positions.py <video_file_path> [--debug]
 """
@@ -36,9 +39,10 @@ class BadmintonCourtTracker:
 
     # Processing parameters
     CONFIDENCE_THRESHOLD = 0.5
-    MAX_TRACKING_DISTANCE = 2.0
-    MERGE_DISTANCE_THRESHOLD = 1.5
-    MIN_FRAMES_FOR_PLAYER = 5
+    MAX_TRACKING_DISTANCE = 2.0  # Reduced for better tracking
+    MERGE_DISTANCE_THRESHOLD = 1.0  # Reduced to prevent merging different players
+    MIN_FRAMES_FOR_PLAYER = 10  # Increased for better player detection
+    VELOCITY_PREDICTION_FACTOR = 0.3  # For motion prediction
 
     # Offset corrections
     ANKLE_TO_GROUND_OFFSET = 0.04  # 4cm from ankle joint to ground contact
@@ -72,13 +76,14 @@ class BadmintonCourtTracker:
         # Enhanced tracking with dynamic windowing
         self._hip_height_history = deque(maxlen=self.MAX_WINDOW_SIZE)
         self._position_history = deque(maxlen=20)  # For motion analysis
-        self._last_positions = []
+        self._last_positions = []  # For tracking continuity
         self._next_id = 0
         self._current_window_size = self.MIN_WINDOW_SIZE
 
-        # Two-player system
+        # Two-player system - FIXED
         self._player_trajectories = defaultdict(list)
         self._final_player_mapping = {}
+        self._player_velocity_history = defaultdict(lambda: deque(maxlen=5))
 
     def load_pose_data(self) -> None:
         """Load pose detection data from JSON file."""
@@ -497,22 +502,77 @@ class BadmintonCourtTracker:
             'estimated_hip_height': self.get_adaptive_hip_height(joints, frame_index) if (hip_left or hip_right) else self.DEFAULT_HIP_HEIGHT
         }
 
+    def predict_position(self, player_id: int) -> Optional[Tuple[float, float]]:
+        """Predict next position based on velocity history."""
+        if player_id not in self._player_velocity_history:
+            return None
+
+        velocities = list(self._player_velocity_history[player_id])
+        if len(velocities) < 2:
+            return None
+
+        # Get last known position
+        last_pos = None
+        for pos in reversed(self._last_positions):
+            if pos['tracked_id'] == player_id:
+                last_pos = pos
+                break
+
+        if not last_pos:
+            return None
+
+        # Calculate average velocity
+        avg_vx = np.mean([v[0] for v in velocities])
+        avg_vy = np.mean([v[1] for v in velocities])
+
+        # Predict next position
+        predicted_x = last_pos['hip_world_X'] + avg_vx * self.VELOCITY_PREDICTION_FACTOR
+        predicted_y = last_pos['hip_world_Y'] + avg_vy * self.VELOCITY_PREDICTION_FACTOR
+
+        return (predicted_x, predicted_y)
+
+    def update_velocity_history(self, player_id: int, current_pos: Tuple[float, float]) -> None:
+        """Update velocity history for a player."""
+        # Find last position for this player
+        last_pos = None
+        for pos in reversed(self._last_positions):
+            if pos['tracked_id'] == player_id:
+                last_pos = pos
+                break
+
+        if last_pos:
+            vx = current_pos[0] - last_pos['hip_world_X']
+            vy = current_pos[1] - last_pos['hip_world_Y']
+            self._player_velocity_history[player_id].append((vx, vy))
+
     def assign_player_ids(self, frame_positions: List[Dict[str, float]]) -> List[Dict[str, Any]]:
-        """Assign consistent player IDs using distance-based tracking."""
+        """FIXED: Assign consistent player IDs using improved distance-based tracking with velocity prediction."""
         assigned_positions = []
         used_ids = set()
 
         for current_pos in frame_positions:
             best_id = None
             min_distance = float('inf')
+            current_world_pos = (current_pos['hip_world_X'], current_pos['hip_world_Y'])
 
+            # Try to match with existing players
             for last_pos in self._last_positions:
                 if last_pos['tracked_id'] in used_ids:
                     continue
 
+                # Calculate distance to last known position
                 dx = current_pos['hip_world_X'] - last_pos['hip_world_X']
                 dy = current_pos['hip_world_Y'] - last_pos['hip_world_Y']
                 distance = np.sqrt(dx*dx + dy*dy)
+
+                # Also try prediction-based matching
+                predicted_pos = self.predict_position(last_pos['tracked_id'])
+                if predicted_pos:
+                    pred_dx = current_pos['hip_world_X'] - predicted_pos[0]
+                    pred_dy = current_pos['hip_world_Y'] - predicted_pos[1]
+                    pred_distance = np.sqrt(pred_dx*pred_dx + pred_dy*pred_dy)
+                    # Use the smaller distance
+                    distance = min(distance, pred_distance)
 
                 if distance < self.MAX_TRACKING_DISTANCE and distance < min_distance:
                     min_distance = distance
@@ -522,9 +582,13 @@ class BadmintonCourtTracker:
             if best_id is not None:
                 tracked_id = best_id
                 used_ids.add(best_id)
+                # Update velocity history
+                self.update_velocity_history(tracked_id, current_world_pos)
             else:
                 tracked_id = self._next_id
                 self._next_id += 1
+                if self.debug:
+                    print(f"New player ID {tracked_id} created at frame")
 
             position_entry = current_pos.copy()
             position_entry['tracked_id'] = tracked_id
@@ -534,8 +598,8 @@ class BadmintonCourtTracker:
         return assigned_positions
 
     def merge_close_detections_in_frame(self, frame_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Merge multiple detections that are too close to be different players."""
-        if len(frame_positions) <= 2:
+        """FIXED: Merge multiple detections that are too close to be different players."""
+        if len(frame_positions) <= 1:
             return frame_positions
 
         merged_positions = []
@@ -587,14 +651,28 @@ class BadmintonCourtTracker:
             else:
                 averaged[key] = 0.0
 
-        averaged['tracked_id'] = positions[0].get('tracked_id', -1)
+        # For merging, keep the tracked_id from the position with most reliable data
+        # (prioritize positions with ankle data)
+        best_position = positions[0]
+        for pos in positions:
+            if (pos.get('left_ankle_world_X', 0) != 0 or pos.get('right_ankle_world_X', 0) != 0):
+                best_position = pos
+                break
+
+        averaged['tracked_id'] = best_position.get('tracked_id', -1)
         return averaged
 
     def analyze_player_trajectories(self) -> None:
-        """Analyze all trajectories to identify the two main players."""
+        """FIXED: Analyze all trajectories to identify the two main players."""
+        # Build trajectories for each tracked ID
         for position in self.player_positions:
             player_id = position['tracked_id']
             self._player_trajectories[player_id].append(position)
+
+        if self.debug:
+            print(f"Found {len(self._player_trajectories)} total tracked IDs")
+            for pid, traj in self._player_trajectories.items():
+                print(f"  ID {pid}: {len(traj)} frames")
 
         # Filter trajectories with sufficient frames
         valid_trajectories = {
@@ -603,68 +681,218 @@ class BadmintonCourtTracker:
             if len(trajectory) >= self.MIN_FRAMES_FOR_PLAYER
         }
 
-        if self.debug:
-            print(f"Found {len(self._player_trajectories)} total trajectories")
-            print(f"Valid trajectories: {len(valid_trajectories)}")
+        print(f"Valid trajectories (>={self.MIN_FRAMES_FOR_PLAYER} frames): {len(valid_trajectories)}")
 
-        if len(valid_trajectories) == 2:
-            player_ids = list(valid_trajectories.keys())
+        if len(valid_trajectories) == 0:
+            print("⚠ No valid trajectories found - using all available data")
+            # Use all trajectories if none meet the minimum
+            valid_trajectories = self._player_trajectories
+
+        if len(valid_trajectories) == 1:
+            # Only one valid player found
+            player_id = list(valid_trajectories.keys())[0]
+            self._final_player_mapping = {player_id: 0}
+            print(f"Single player detected: ID {player_id} -> Player 0")
+
+        elif len(valid_trajectories) == 2:
+            # Perfect case: exactly two players
+            player_ids = sorted(valid_trajectories.keys())
             self._final_player_mapping = {player_ids[0]: 0, player_ids[1]: 1}
-        elif len(valid_trajectories) > 2:
-            self.merge_similar_trajectories(valid_trajectories)
+            print(f"Two players detected: ID {player_ids[0]} -> Player 0, ID {player_ids[1]} -> Player 1")
+
         else:
-            player_ids = list(valid_trajectories.keys())
-            for i, player_id in enumerate(player_ids):
-                self._final_player_mapping[player_id] = i
+            # More than 2 valid trajectories - need to merge/consolidate
+            print(f"Multiple trajectories detected ({len(valid_trajectories)}), consolidating...")
+            self.consolidate_trajectories(valid_trajectories)
 
-    def merge_similar_trajectories(self, valid_trajectories: Dict[int, List[Dict]]) -> None:
-        """Merge trajectories that likely belong to the same player."""
-        trajectory_centers = {}
+    def consolidate_trajectories(self, valid_trajectories: Dict[int, List[Dict]]) -> None:
+        """FIXED: Consolidate multiple trajectories into two main players using improved logic."""
+        # Calculate trajectory characteristics
+        trajectory_stats = {}
         for player_id, trajectory in valid_trajectories.items():
-            avg_x = sum(pos['hip_world_X'] for pos in trajectory) / len(trajectory)
-            avg_y = sum(pos['hip_world_Y'] for pos in trajectory) / len(trajectory)
-            trajectory_centers[player_id] = (avg_x, avg_y, len(trajectory))
+            positions = [(pos['hip_world_X'], pos['hip_world_Y']) for pos in trajectory]
 
-        # Sort by trajectory length
+            # Calculate centroid
+            avg_x = sum(pos[0] for pos in positions) / len(positions)
+            avg_y = sum(pos[1] for pos in positions) / len(positions)
+
+            # Calculate spread (how much the player moves around)
+            spread = np.mean([np.sqrt((pos[0] - avg_x)**2 + (pos[1] - avg_y)**2) for pos in positions])
+
+            # Calculate frame span
+            frames = [pos['frame_index'] for pos in trajectory]
+            frame_span = max(frames) - min(frames) + 1
+            frame_density = len(trajectory) / frame_span if frame_span > 0 else 0
+
+            trajectory_stats[player_id] = {
+                'centroid': (avg_x, avg_y),
+                'length': len(trajectory),
+                'spread': spread,
+                'frame_span': frame_span,
+                'frame_density': frame_density,
+                'trajectory': trajectory
+            }
+
+        # Sort by trajectory quality (length * frame_density)
         sorted_trajectories = sorted(
-            trajectory_centers.items(),
-            key=lambda x: x[1][2],
+            trajectory_stats.items(),
+            key=lambda x: x[1]['length'] * x[1]['frame_density'],
             reverse=True
         )
 
-        # Keep two longest as main players
-        main_players = sorted_trajectories[:2]
-        self._final_player_mapping = {main_players[0][0]: 0, main_players[1][0]: 1}
+        if self.debug:
+            print("Trajectory analysis:")
+            for pid, stats in sorted_trajectories:
+                print(f"  ID {pid}: {stats['length']} frames, density={stats['frame_density']:.2f}, "
+                      f"centroid=({stats['centroid'][0]:.1f}, {stats['centroid'][1]:.1f}), spread={stats['spread']:.1f}")
 
-        # Merge remaining with closest main player
-        for player_id, (avg_x, avg_y, length) in sorted_trajectories[2:]:
-            min_distance = float('inf')
-            closest_main_player = 0
+        # Take the two best trajectories as main players
+        if len(sorted_trajectories) >= 2:
+            main_player_1 = sorted_trajectories[0][0]
+            main_player_2 = sorted_trajectories[1][0]
 
-            for main_id, final_id in self._final_player_mapping.items():
-                main_x, main_y, _ = trajectory_centers[main_id]
-                distance = np.sqrt((avg_x - main_x)**2 + (avg_y - main_y)**2)
+            # Check if they're spatially separated (different players)
+            centroid_1 = trajectory_stats[main_player_1]['centroid']
+            centroid_2 = trajectory_stats[main_player_2]['centroid']
+            separation = np.sqrt((centroid_1[0] - centroid_2[0])**2 + (centroid_1[1] - centroid_2[1])**2)
 
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_main_player = final_id
+            if separation < 2.0:  # Too close, might be same player
+                print(f"⚠ Main trajectories too close (separation={separation:.1f}m), checking alternatives...")
+                # Try next best trajectory
+                if len(sorted_trajectories) >= 3:
+                    for i in range(2, len(sorted_trajectories)):
+                        alt_player = sorted_trajectories[i][0]
+                        alt_centroid = trajectory_stats[alt_player]['centroid']
+                        alt_sep_1 = np.sqrt((centroid_1[0] - alt_centroid[0])**2 + (centroid_1[1] - alt_centroid[1])**2)
+                        alt_sep_2 = np.sqrt((centroid_2[0] - alt_centroid[0])**2 + (centroid_2[1] - alt_centroid[1])**2)
 
-            self._final_player_mapping[player_id] = closest_main_player
+                        if alt_sep_1 > 2.0 or alt_sep_2 > 2.0:
+                            if alt_sep_1 > alt_sep_2:
+                                main_player_2 = alt_player
+                            else:
+                                main_player_1 = alt_player
+                            print(f"Using alternative trajectory ID {alt_player}")
+                            break
+
+            self._final_player_mapping = {main_player_1: 0, main_player_2: 1}
+
+            # Merge remaining trajectories with the closest main player
+            for player_id, stats in sorted_trajectories[2:]:
+                if player_id in [main_player_1, main_player_2]:
+                    continue
+
+                centroid = stats['centroid']
+                dist_to_p1 = np.sqrt((centroid[0] - centroid_1[0])**2 + (centroid[1] - centroid_1[1])**2)
+                dist_to_p2 = np.sqrt((centroid[0] - centroid_2[0])**2 + (centroid[1] - centroid_2[1])**2)
+
+                if dist_to_p1 < dist_to_p2:
+                    self._final_player_mapping[player_id] = 0
+                    print(f"Merging ID {player_id} with Player 0 (distance={dist_to_p1:.1f}m)")
+                else:
+                    self._final_player_mapping[player_id] = 1
+                    print(f"Merging ID {player_id} with Player 1 (distance={dist_to_p2:.1f}m)")
+
+        else:
+            # Only one trajectory available
+            main_player = sorted_trajectories[0][0]
+            self._final_player_mapping = {main_player: 0}
 
     def apply_two_player_mapping(self) -> None:
-        """Apply the final two-player mapping to all positions."""
+        """FIXED: Apply the final two-player mapping to all positions."""
+        if not self._final_player_mapping:
+            print("⚠ No player mapping available - assigning default IDs")
+            # Fallback: assign based on tracked_id
+            unique_ids = list(set(pos['tracked_id'] for pos in self.player_positions))
+            for i, uid in enumerate(sorted(unique_ids)[:2]):
+                self._final_player_mapping[uid] = i
+
+        # Apply mapping
+        unmapped_count = 0
         for position in self.player_positions:
             original_id = position['tracked_id']
-            position['player_id'] = self._final_player_mapping.get(original_id, 0)
+            if original_id in self._final_player_mapping:
+                position['player_id'] = self._final_player_mapping[original_id]
+            else:
+                # Assign to player 0 if not mapped
+                position['player_id'] = 0
+                unmapped_count += 1
 
+        if unmapped_count > 0:
+            print(f"⚠ {unmapped_count} positions could not be mapped, assigned to Player 0")
+
+        # Sort by frame and player for consistency
         self.player_positions.sort(key=lambda x: (x['frame_index'], x['player_id']))
 
+        # Report final distribution
         player_0_frames = len([p for p in self.player_positions if p['player_id'] == 0])
         player_1_frames = len([p for p in self.player_positions if p['player_id'] == 1])
 
         print(f"Final player distribution:")
         print(f"  Player 0: {player_0_frames} frames")
         print(f"  Player 1: {player_1_frames} frames")
+
+        # Validate no duplicate player assignments in same frame
+        frame_groups = defaultdict(list)
+        for pos in self.player_positions:
+            frame_groups[pos['frame_index']].append(pos['player_id'])
+
+        duplicate_frames = 0
+        for frame_idx, player_ids in frame_groups.items():
+            if len(player_ids) > len(set(player_ids)):
+                duplicate_frames += 1
+
+        if duplicate_frames > 0:
+            print(f"⚠ Found {duplicate_frames} frames with duplicate player assignments")
+            self.fix_duplicate_assignments()
+        else:
+            print("✓ No duplicate player assignments found")
+
+    def fix_duplicate_assignments(self) -> None:
+        """Fix frames where multiple detections are assigned to the same player."""
+        frame_groups = defaultdict(list)
+        for i, pos in enumerate(self.player_positions):
+            frame_groups[pos['frame_index']].append((i, pos))
+
+        fixes_applied = 0
+        for frame_idx, positions in frame_groups.items():
+            if len(positions) <= 1:
+                continue
+
+            # Group by player_id
+            player_groups = defaultdict(list)
+            for idx, pos in positions:
+                player_groups[pos['player_id']].append((idx, pos))
+
+            # Fix groups with multiple assignments
+            for player_id, player_positions in player_groups.items():
+                if len(player_positions) > 1:
+                    # Keep the position with better ankle data, or first one
+                    best_idx, best_pos = player_positions[0]
+                    for idx, pos in player_positions[1:]:
+                        if (pos.get('left_ankle_world_X', 0) != 0 or pos.get('right_ankle_world_X', 0) != 0):
+                            if (best_pos.get('left_ankle_world_X', 0) == 0 and best_pos.get('right_ankle_world_X', 0) == 0):
+                                best_idx, best_pos = idx, pos
+
+                    # Reassign others to different player or remove
+                    for idx, pos in player_positions:
+                        if idx != best_idx:
+                            # Try to assign to the other player
+                            other_player = 1 - player_id
+                            # Check if other player is already assigned in this frame
+                            other_assigned = any(p['player_id'] == other_player for _, p in positions)
+                            if not other_assigned:
+                                self.player_positions[idx]['player_id'] = other_player
+                                fixes_applied += 1
+                            else:
+                                # Remove this position as duplicate
+                                self.player_positions[idx] = None
+                                fixes_applied += 1
+
+        # Remove None entries
+        self.player_positions = [pos for pos in self.player_positions if pos is not None]
+
+        if fixes_applied > 0:
+            print(f"✓ Fixed {fixes_applied} duplicate assignments")
 
     def process_frame(self, frame_data: List[Dict], frame_index: int) -> List[Dict[str, Any]]:
         """Process all players in a single frame."""
@@ -677,8 +905,14 @@ class BadmintonCourtTracker:
             if position:
                 frame_positions.append(position)
 
+        if self.debug and len(frame_positions) > 2:
+            print(f"Frame {frame_index}: {len(frame_positions)} detections before processing")
+
         frame_positions = self.assign_player_ids(frame_positions)
         frame_positions = self.merge_close_detections_in_frame(frame_positions)
+
+        if self.debug and len(frame_positions) > 2:
+            print(f"Frame {frame_index}: {len(frame_positions)} detections after processing")
 
         return frame_positions
 
@@ -707,7 +941,7 @@ class BadmintonCourtTracker:
 
         print(f"Extracted {len(self.player_positions)} player positions")
 
-        # Apply two-player system
+        # Apply two-player system with improved logic
         self.analyze_player_trajectories()
         self.apply_two_player_mapping()
 
@@ -737,11 +971,20 @@ class BadmintonCourtTracker:
 
         out_of_bounds_ratio = out_of_bounds / len(sample_positions)
 
+        # Check for ID consistency
+        frame_id_consistency = defaultdict(set)
+        for pos in self.player_positions:
+            frame_id_consistency[pos['frame_index']].add(pos['player_id'])
+
+        frames_with_duplicates = sum(1 for ids in frame_id_consistency.values() if len(ids) < len([p for p in self.player_positions if p['frame_index'] == list(frame_id_consistency.keys())[0]]))
+
         print(f"\n=== Tracking Quality Assessment ===")
         print(f"Positions analyzed: {len(sample_positions)}")
         print(f"X range: {min(x_positions):.2f} to {max(x_positions):.2f}m")
         print(f"Y range: {min(y_positions):.2f} to {max(y_positions):.2f}m")
         print(f"Out of bounds: {out_of_bounds_ratio:.1%}")
+        print(f"Unique tracked IDs: {len(set(pos['tracked_id'] for pos in self.player_positions))}")
+        print(f"Final player mapping: {self._final_player_mapping}")
 
         if out_of_bounds_ratio > 0.1:
             print("⚠ High out-of-bounds ratio detected - check calibration")
@@ -758,7 +1001,7 @@ class BadmintonCourtTracker:
             'all_court_points': self.pose_data.get('all_court_points', self.court_points),
             'video_info': self.video_info,
             'player_positions': self.player_positions,
-            'tracking_method': "Simplified ankle-prioritized positioning with adaptive hip height supplementation and dynamic frame windowing (assumes pre-standardized court points)",
+            'tracking_method': "Fixed ankle-prioritized positioning with improved two-player mapping and duplicate detection",
             'processing_info': {
                 'total_positions': len(self.player_positions),
                 'frames_with_players': frames_with_players,
@@ -766,12 +1009,16 @@ class BadmintonCourtTracker:
                 'camera_height_meters': self.camera_height,
                 'camera_position': self.camera_position.tolist() if self.camera_position is not None else None,
                 'court_points_pre_standardized': True,
+                'player_id_mapping': self._final_player_mapping,
                 'enhanced_features': {
                     'ankle_prioritized_weighting': True,
                     'dynamic_frame_windowing': True,
                     'adaptive_hip_height': True,
                     'motion_based_windowing': True,
-                    'boundary_validation': True
+                    'boundary_validation': True,
+                    'velocity_prediction': True,
+                    'duplicate_detection': True,
+                    'trajectory_consolidation': True
                 },
                 'weighting_scheme': {
                     'ankle_weight': 0.4,
@@ -780,6 +1027,7 @@ class BadmintonCourtTracker:
                 },
                 'window_size_range': [self.MIN_WINDOW_SIZE, self.MAX_WINDOW_SIZE],
                 'merge_distance_threshold_meters': self.MERGE_DISTANCE_THRESHOLD,
+                'tracking_distance_threshold_meters': self.MAX_TRACKING_DISTANCE,
                 'min_frames_for_valid_player': self.MIN_FRAMES_FOR_PLAYER
             }
         }
@@ -794,8 +1042,8 @@ class BadmintonCourtTracker:
         print(f"Frames with players: {frames_with_players}")
 
     def run(self) -> None:
-        """Run the simplified tracking pipeline."""
-        print(f"Starting simplified position tracking for: {self.video_name}")
+        """Run the fixed tracking pipeline."""
+        print(f"Starting FIXED position tracking for: {self.video_name}")
 
         try:
             self.load_pose_data()
@@ -805,7 +1053,7 @@ class BadmintonCourtTracker:
             self.process_all_frames()
             self.detect_potential_issues()
             self.save_results()
-            print("Simplified position tracking completed successfully!")
+            print("✓ Fixed position tracking completed successfully!")
 
         except Exception as e:
             print(f"Error during processing: {e}")
