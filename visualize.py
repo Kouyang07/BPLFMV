@@ -819,7 +819,12 @@ def visualize_stage2(video_path: str, data_path: str, output_path: str, num_thre
 
     processor = VideoProcessor(video_path, num_threads)
     data = load_json_data(data_path)
-    all_court_points = data.get("all_court_points", data.get("court_points", {}))
+
+    # Use enlarged court points if available, otherwise fall back to all_court_points or court_points
+    court_points = data.get("enlarged_court_points",
+                            data.get("all_court_points",
+                                     data.get("court_points", {})))
+
     pose_data = data["pose_data"]
     video_info = data["video_info"]
 
@@ -841,7 +846,7 @@ def visualize_stage2(video_path: str, data_path: str, output_path: str, num_thre
             batch_frames = processor.get_frame_batch(start_frame, end_frame - start_frame)
 
             if batch_frames:
-                args = (batch_frames, poses_by_frame, all_court_points, processor.pose_edges,
+                args = (batch_frames, poses_by_frame, court_points, processor.pose_edges,
                         processor.colors['players'])
                 future = executor.submit(process_stage2_batch, args)
                 futures.append((start_frame, future))

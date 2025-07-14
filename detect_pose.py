@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Enhanced Pose Estimation with Perspective-Aware Court Boundary Enlargement
+Enhanced Pose Estimation with Simplified ID Assignment
 
 Implementation based on research paper methodology:
 - YOLOv11x-pose for human keypoint detection
 - Perspective-n-Point (PnP) algorithm for camera pose estimation
 - Intelligent boundary extension based on camera elevation angle
 - Ankle-knee joint validation for player filtering
-- Multi-person tracking with Hungarian algorithm for ID assignment
+- Simplified player ID assignment based on Y position
 
 Reads court.csv and outputs pose.json with validated player poses.
 """
@@ -22,7 +22,6 @@ import csv
 import logging
 from tqdm import tqdm
 from ultralytics import YOLO
-from scipy.optimize import linear_sum_assignment
 import warnings
 
 # Suppress warnings and YOLO output
@@ -39,185 +38,6 @@ MAX_JUMP_HEIGHT = 1.25  # maximum expected jump height in meters
 ANKLE_KNEE_INDICES = [13, 14, 15, 16]  # left_knee, right_knee, left_ankle, right_ankle
 MIN_ANKLE_KNEE_JOINTS = 2  # minimum required ankle/knee joints for validation
 CONFIDENCE_THRESHOLD = 0.5  # minimum confidence for joint detection
-
-# Tracking parameters
-MAX_TRACK_DISTANCE = 100  # maximum pixel distance for track association
-MAX_TRACK_AGE = 30  # maximum frames to keep a track without detection
-
-
-class TrackState:
-    """Manages individual player track state."""
-    def __init__(self, track_id, initial_pose, frame_idx):
-        self.id = track_id
-        self.poses = [initial_pose]
-        self.frame_indices = [frame_idx]
-        self.last_seen = frame_idx
-        self.age = 0
-        self.center_history = [self._get_pose_center(initial_pose)]
-
-    def _get_pose_center(self, pose):
-        """Calculate center point of pose from valid keypoints."""
-        valid_points = []
-        for joint in pose['joints']:
-            if joint['confidence'] > CONFIDENCE_THRESHOLD:
-                valid_points.append([joint['x'], joint['y']])
-
-        if valid_points:
-            center = np.mean(valid_points, axis=0)
-            return [float(center[0]), float(center[1])]
-        return [0.0, 0.0]
-
-    def update(self, new_pose, frame_idx):
-        """Update track with new pose detection."""
-        self.poses.append(new_pose)
-        self.frame_indices.append(frame_idx)
-        self.last_seen = frame_idx
-        self.age = 0
-        self.center_history.append(self._get_pose_center(new_pose))
-
-    def predict_position(self):
-        """Predict next position based on velocity."""
-        if len(self.center_history) < 2:
-            return self.center_history[-1] if self.center_history else [0, 0]
-
-        # Simple linear prediction based on last two positions
-        velocity = [
-            self.center_history[-1][0] - self.center_history[-2][0],
-            self.center_history[-1][1] - self.center_history[-2][1]
-        ]
-        predicted = [
-            self.center_history[-1][0] + velocity[0],
-            self.center_history[-1][1] + velocity[1]
-        ]
-        return predicted
-
-
-class MultiPersonTracker:
-    """Handles tracking of multiple players with ID assignment."""
-    def __init__(self):
-        self.tracks = {}
-        self.next_id = 0
-        self.frame_idx = 0
-
-    def update(self, valid_poses, frame_idx):
-        """Update tracks with new pose detections using Hungarian algorithm."""
-        self.frame_idx = frame_idx
-
-        # Age existing tracks
-        for track in self.tracks.values():
-            track.age += 1
-
-        if not valid_poses:
-            return []
-
-        # Calculate cost matrix for pose-to-track assignment
-        active_tracks = [t for t in self.tracks.values() if t.age < MAX_TRACK_AGE]
-
-        if not active_tracks:
-            # No active tracks, create new ones
-            for pose in valid_poses:
-                self._create_new_track(pose, frame_idx)
-        else:
-            # Calculate distance matrix
-            cost_matrix = np.full((len(valid_poses), len(active_tracks)), np.inf)
-
-            for pose_idx, pose in enumerate(valid_poses):
-                pose_center = self._get_pose_center(pose)
-                for track_idx, track in enumerate(active_tracks):
-                    predicted_pos = track.predict_position()
-                    distance = np.linalg.norm(np.array(pose_center) - np.array(predicted_pos))
-
-                    if distance < MAX_TRACK_DISTANCE:
-                        # Include pose similarity in cost
-                        pose_similarity = self._calculate_pose_similarity(pose, track.poses[-1])
-                        cost_matrix[pose_idx, track_idx] = distance + (1.0 - pose_similarity) * 50
-
-            # Solve assignment problem using Hungarian algorithm
-            pose_indices, track_indices = linear_sum_assignment(cost_matrix)
-
-            # Update matched tracks
-            unmatched_poses = list(range(len(valid_poses)))
-            for pose_idx, track_idx in zip(pose_indices, track_indices):
-                if cost_matrix[pose_idx, track_idx] < np.inf:
-                    active_tracks[track_idx].update(valid_poses[pose_idx], frame_idx)
-                    unmatched_poses.remove(pose_idx)
-
-            # Create new tracks for unmatched poses
-            for pose_idx in unmatched_poses:
-                self._create_new_track(valid_poses[pose_idx], frame_idx)
-
-        # Remove old tracks
-        self.tracks = {tid: track for tid, track in self.tracks.items() if track.age < MAX_TRACK_AGE}
-
-        # Assign player IDs based on court position (left=0, right=1)
-        return self._assign_player_ids()
-
-    def _create_new_track(self, pose, frame_idx):
-        """Create new track for unmatched pose."""
-        track = TrackState(self.next_id, pose, frame_idx)
-        self.tracks[self.next_id] = track
-        self.next_id += 1
-
-    def _get_pose_center(self, pose):
-        """Calculate center point of pose from valid keypoints."""
-        valid_points = []
-        for joint in pose['joints']:
-            if joint['confidence'] > CONFIDENCE_THRESHOLD:
-                valid_points.append([joint['x'], joint['y']])
-
-        if valid_points:
-            center = np.mean(valid_points, axis=0)
-            return [float(center[0]), float(center[1])]
-        return [0.0, 0.0]
-
-    def _calculate_pose_similarity(self, pose1, pose2):
-        """Calculate similarity between two poses based on keypoint positions."""
-        similarity_sum = 0.0
-        valid_joints = 0
-
-        for i, (joint1, joint2) in enumerate(zip(pose1['joints'], pose2['joints'])):
-            if (joint1['confidence'] > CONFIDENCE_THRESHOLD and
-                    joint2['confidence'] > CONFIDENCE_THRESHOLD):
-                distance = np.sqrt((joint1['x'] - joint2['x'])**2 + (joint1['y'] - joint2['y'])**2)
-                # Normalize by image diagonal (assuming ~1000px diagonal)
-                normalized_distance = distance / 1000.0
-                similarity = max(0, 1.0 - normalized_distance)
-                similarity_sum += similarity
-                valid_joints += 1
-
-        return similarity_sum / max(1, valid_joints)
-
-    def _assign_player_ids(self):
-        """Assign player IDs (0, 1) based on court position relative to center line."""
-        active_tracks = [t for t in self.tracks.values() if t.age == 0]  # Only recently updated tracks
-
-        if len(active_tracks) == 0:
-            return []
-        elif len(active_tracks) == 1:
-            # Single player, assign ID 0
-            pose = active_tracks[0].poses[-1].copy()
-            pose['player_id'] = 0
-            pose['track_id'] = active_tracks[0].id
-            return [pose]
-        else:
-            # Multiple players, assign based on horizontal position
-            poses_with_positions = []
-            for track in active_tracks:
-                pose = track.poses[-1].copy()
-                center = self._get_pose_center(pose)
-                poses_with_positions.append((pose, center[0], track.id))
-
-            # Sort by x-coordinate (left to right)
-            poses_with_positions.sort(key=lambda x: x[1])
-
-            # Assign IDs: leftmost = 0, rightmost = 1
-            result = []
-            for i, (pose, x_pos, track_id) in enumerate(poses_with_positions[:2]):  # Max 2 players
-                pose['player_id'] = i
-                pose['track_id'] = track_id
-                result.append(pose)
-
-            return result
 
 
 def read_court_csv(csv_path):
@@ -588,13 +408,12 @@ def get_video_info(video_path):
     }
 
 
-class EnhancedPoseDetector:
-    """Enhanced pose detection system with perspective-aware processing."""
+class SimplifiedPoseDetector:
+    """Simplified pose detection system with basic Y-position based ID assignment."""
 
     def __init__(self):
         self.device = self._select_device()
         self._setup_yolo()
-        self.tracker = MultiPersonTracker()
 
     def _select_device(self):
         """Select optimal device for processing."""
@@ -645,16 +464,54 @@ class EnhancedPoseDetector:
             results = self.pose_model(frame, verbose=False)
         return results
 
+    def assign_simple_player_ids(self, valid_poses):
+        """Simple Y-position based player ID assignment."""
+        if len(valid_poses) == 0:
+            return []
+        elif len(valid_poses) == 1:
+            pose = valid_poses[0].copy()
+            pose['player_id'] = 0
+            return [pose]
+        else:
+            # Calculate average Y position for each pose
+            poses_with_y = []
+            for pose in valid_poses:
+                total_y = 0
+                count = 0
+
+                # Include ankle and hip joints in Y calculation
+                for joint in pose['joints']:
+                    joint_idx = joint['joint_index']
+                    # Ankle indices: 15, 16; Hip indices: 11, 12
+                    if joint_idx in [11, 12, 15, 16] and joint['confidence'] > CONFIDENCE_THRESHOLD:
+                        total_y += joint['y']
+                        count += 1
+
+                avg_y = total_y / count if count > 0 else float('inf')
+                poses_with_y.append((pose, avg_y))
+
+            # Sort by Y position (lower Y = closer to top of screen)
+            poses_with_y.sort(key=lambda x: x[1])
+
+            # Assign IDs: lowest Y = player 0, highest Y = player 1
+            result = []
+            for i, (pose, y_pos) in enumerate(poses_with_y[:2]):  # Max 2 players
+                pose_copy = pose.copy()
+                pose_copy['player_id'] = i
+                result.append(pose_copy)
+
+            return result
+
     def process_video(self, video_path, court_csv_path, output_json_path):
-        """Process video for enhanced pose estimation."""
+        """Process video for simplified pose estimation."""
         print(f"Processing video: {video_path}")
 
         # Load court data
         all_court_points = read_court_csv(court_csv_path)
         corner_points = extract_corner_points(all_court_points)
 
-        print("\n=== Enhanced Pose Estimation Pipeline ===")
-        print("Implementing perspective-aware court boundary enlargement...")
+        print("\n=== Simplified Pose Estimation Pipeline ===")
+        print("Using Y-position based player ID assignment...")
 
         # Attempt perspective-aware enlargement
         success, rvec, tvec, camera_matrix = solve_camera_pose(corner_points)
@@ -695,7 +552,7 @@ class EnhancedPoseDetector:
 
         print(f"Processing {len(rally_frames)} frames...")
         print(f"Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
-        print(f"Using multi-person tracking with Hungarian algorithm")
+        print(f"Using simple Y-position based player ID assignment")
 
         cap = cv2.VideoCapture(video_path)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -756,8 +613,8 @@ class EnhancedPoseDetector:
 
                                 frame_valid_poses.append(pose_data)
 
-                    # Update tracker and assign player IDs
-                    tracked_poses = self.tracker.update(frame_valid_poses, frame_index)
+                    # Assign player IDs based on Y position
+                    tracked_poses = self.assign_simple_player_ids(frame_valid_poses)
                     all_pose_data.extend(tracked_poses)
 
                 frame_index += 1
@@ -783,18 +640,17 @@ class EnhancedPoseDetector:
                 "validation_criteria": f"At least {MIN_ANKLE_KNEE_JOINTS} ankle/knee joints in enlarged boundary",
                 "ankle_knee_joint_indices": ANKLE_KNEE_INDICES,
                 "confidence_threshold": CONFIDENCE_THRESHOLD,
-                "tracking_algorithm": "Hungarian algorithm with pose similarity",
+                "id_assignment_method": "Simple Y-position based (lowest Y = Player 0)",
                 "model_device": self.device,
                 "model_type": "YOLOv11x-pose",
-                "pose_estimator": "Enhanced Perspective-Aware Pose Estimation",
+                "pose_estimator": "Simplified Pose Estimation with Y-position ID Assignment",
                 "court_dimensions": f"{COURT_LENGTH}m x {COURT_WIDTH}m",
                 "implementation_features": [
                     "Perspective-n-Point (PnP) camera pose estimation",
                     "Geometric camera intrinsic parameter estimation",
                     "Intelligent boundary extension based on elevation angle",
                     "Ankle-knee joint validation for player filtering",
-                    "Multi-person tracking with Hungarian algorithm",
-                    "Player ID assignment based on court position"
+                    "Simple Y-position based player ID assignment"
                 ]
             }
         }
@@ -807,7 +663,7 @@ class EnhancedPoseDetector:
         print(f"✓ Total valid poses detected: {len(all_pose_data)}")
         print(f"✓ Enlargement method: {enlargement_method}")
         print(f"✓ Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
-        print(f"✓ Tracking: Multi-person with ID assignment")
+        print(f"✓ ID Assignment: Y-position based (lowest Y = Player 0)")
         print(f"✓ Data saved to: {output_json_path}")
         print("===========================")
 
@@ -815,19 +671,18 @@ class EnhancedPoseDetector:
 
 
 def main(video_path):
-    """Main enhanced pose estimation function."""
+    """Main simplified pose estimation function."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     print("="*80)
-    print("ENHANCED POSE ESTIMATION WITH PERSPECTIVE-AWARE COURT ENLARGEMENT")
+    print("SIMPLIFIED POSE ESTIMATION WITH Y-POSITION BASED ID ASSIGNMENT")
     print("="*80)
-    print("Implementation based on research paper methodology:")
+    print("Implementation features:")
     print("• YOLOv11x-pose for human keypoint detection")
     print("• Perspective-n-Point (PnP) algorithm for camera pose estimation")
     print("• Intelligent boundary extension based on camera elevation angle")
     print("• Ankle-knee joint validation for player filtering")
-    print("• Multi-person tracking with Hungarian algorithm")
-    print("• Player ID assignment based on court position")
+    print("• Simple Y-position based player ID assignment")
     print("="*80)
     print(f"Court dimensions: {COURT_LENGTH}m x {COURT_WIDTH}m")
     print(f"Maximum jump height: {MAX_JUMP_HEIGHT}m")
@@ -847,8 +702,8 @@ def main(video_path):
         logging.error("Please run court detection first: python3 detect_court.py <video_path>")
         return None
 
-    # Initialize enhanced pose detector
-    pose_detector = EnhancedPoseDetector()
+    # Initialize simplified pose detector
+    pose_detector = SimplifiedPoseDetector()
 
     try:
         output_path = pose_detector.process_video(video_path, court_csv_path, output_json_path)
@@ -869,7 +724,7 @@ if __name__ == "__main__":
         print("\nRequirements:")
         print("  - Court detection must be run first (court.csv required)")
         print("  - YOLOv11x-pose model (will be downloaded if not found)")
-        print("  - OpenCV, PyTorch, Ultralytics, SciPy")
+        print("  - OpenCV, PyTorch, Ultralytics")
         sys.exit(1)
 
     input_video_path = sys.argv[1]
@@ -881,8 +736,8 @@ if __name__ == "__main__":
 
     result = main(input_video_path)
     if result:
-        print(f"\n✓ Success! Enhanced pose estimation completed.")
+        print(f"\n✓ Success! Simplified pose estimation completed.")
         print(f"  Output: {result}")
     else:
-        print(f"\n✗ Failed! Enhanced pose estimation encountered errors.")
+        print(f"\n✗ Failed! Simplified pose estimation encountered errors.")
         sys.exit(1)
