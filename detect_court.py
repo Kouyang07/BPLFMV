@@ -12,6 +12,7 @@ from typing import Dict, List, Tuple
 class StreamlinedBadmintonCalibrator:
     """
     Streamlined badminton court calibration that outputs everything to a single CSV file.
+    Enhanced with improved calibration selection logic from deploy.py
     """
 
     def __init__(self, debug: bool = False):
@@ -77,6 +78,7 @@ class StreamlinedBadmintonCalibrator:
             f.seek(0)
 
             if 'Point' in sample_line and 'X' in sample_line and 'Y' in sample_line:
+                print("📋 CSV has header row")
                 reader = csv.DictReader(f)
                 for row in reader:
                     try:
@@ -84,9 +86,14 @@ class StreamlinedBadmintonCalibrator:
                         x_coord = float(row['X'])
                         y_coord = float(row['Y'])
                         court_points[point_name] = [x_coord, y_coord]
-                    except (ValueError, KeyError):
+                        if self.debug:
+                            print(f"   {point_name}: ({x_coord:.1f}, {y_coord:.1f})")
+                    except (ValueError, KeyError) as e:
+                        if self.debug:
+                            print(f"⚠️  Skipping invalid row: {e}")
                         continue
             else:
+                print("📋 CSV without header, using positional parsing")
                 reader = csv.reader(f)
                 for row in reader:
                     if len(row) >= 3:
@@ -95,14 +102,22 @@ class StreamlinedBadmintonCalibrator:
                             x_coord = float(row[1])
                             y_coord = float(row[2])
                             court_points[point_name] = [x_coord, y_coord]
-                        except (ValueError, IndexError):
+                            if self.debug:
+                                print(f"   {point_name}: ({x_coord:.1f}, {y_coord:.1f})")
+                        except (ValueError, IndexError) as e:
+                            if self.debug:
+                                print(f"⚠️  Skipping invalid row: {e}")
                             continue
 
+        print(f"✅ Loaded {len(court_points)} court points")
         return court_points
 
     def calibrate_camera(self, detected_points: Dict[str, List[float]],
                          image_size: Tuple[int, int]) -> Dict:
-        """Enhanced camera calibration with coordinate system correction."""
+        """Enhanced camera calibration with improved method selection from deploy.py"""
+
+        print(f"🎯 Starting calibration with {len(detected_points)} points")
+        print(f"📐 Image size: {image_size[0]}x{image_size[1]}")
 
         # Separate coplanar and non-coplanar points
         coplanar_points = {}
@@ -116,10 +131,12 @@ class StreamlinedBadmintonCalibrator:
                     noncoplanar_points[name] = coords
 
         all_points = {**coplanar_points, **noncoplanar_points}
+        print(f"📊 Point breakdown: {len(coplanar_points)} coplanar, {len(noncoplanar_points)} non-coplanar")
 
         if len(all_points) < 6:
             if len(all_points) < 4:
                 raise ValueError(f"Need at least 4 points, got {len(all_points)}")
+            print("⚠️  Less than 6 points available - calibration may be less robust")
 
         # Prepare point correspondences
         object_points = []
@@ -142,18 +159,20 @@ class StreamlinedBadmintonCalibrator:
             [0, 0, 1]
         ], dtype=np.float32)
 
-        # Determine if non-coplanar points are present
+        print(f"🔍 Initial focal length estimate: {focal_estimate:.0f}")
+
+        # Determine calibration flags
         has_noncoplanar = len(noncoplanar_points) > 0
 
         if has_noncoplanar:
-            # Estimate with some distortion for non-coplanar cases
+            print("🔧 Using non-coplanar calibration mode with rational distortion model")
             flags = (cv2.CALIB_USE_INTRINSIC_GUESS |
                      cv2.CALIB_RATIONAL_MODEL |
                      cv2.CALIB_FIX_PRINCIPAL_POINT |
                      cv2.CALIB_FIX_ASPECT_RATIO)
             dist_coeffs_init = np.zeros(8, dtype=np.float32)
         else:
-            # Restricted model for coplanar points: no distortion, fix principal point and aspect ratio
+            print("🔧 Using coplanar-only calibration mode (no distortion)")
             flags = (cv2.CALIB_USE_INTRINSIC_GUESS |
                      cv2.CALIB_FIX_PRINCIPAL_POINT |
                      cv2.CALIB_FIX_ASPECT_RATIO |
@@ -162,54 +181,152 @@ class StreamlinedBadmintonCalibrator:
                      cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5 | cv2.CALIB_FIX_K6)
             dist_coeffs_init = np.zeros(8, dtype=np.float32)
 
-        # Try calibration with coordinate system correction
+        # IMPROVED LOGIC FROM DEPLOY.PY: Store results from different methods for comparison
+        calibration_attempts = []
+
+        # Method 1: Try original coordinates first
         try:
-            ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+            print("📐 Method 1: Attempting calibration with original coordinates...")
+            ret1, camera_matrix1, dist_coeffs1, rvecs1, tvecs1 = cv2.calibrateCamera(
                 object_points, image_points, image_size,
                 camera_matrix_init, dist_coeffs_init, flags=flags
             )
 
-            camera_height = float(tvecs[0][2][0])
-
-            # If camera height is unreasonable, try Y-axis flip
-            if camera_height < 0 or camera_height > 50:
-                object_points_y_flip = object_points.copy()
-                max_y = np.max(object_points_y_flip[0, :, 1])
-                object_points_y_flip[0, :, 1] = max_y - object_points_y_flip[0, :, 1]
-
-                ret_y, camera_matrix_y, dist_coeffs_y, rvecs_y, tvecs_y = cv2.calibrateCamera(
-                    object_points_y_flip, image_points, image_size,
-                    camera_matrix_init, dist_coeffs_init, flags=flags
+            if ret1:
+                # Calculate reprojection error for original
+                projected_points1, _ = cv2.projectPoints(
+                    object_points[0], rvecs1[0], tvecs1[0], camera_matrix1, dist_coeffs1
                 )
+                projected_points1 = projected_points1.reshape(-1, 2)
+                errors1 = np.sqrt(np.sum((image_points[0] - projected_points1)**2, axis=1))
+                mean_error1 = np.mean(errors1)
+                camera_height1 = float(tvecs1[0][2][0])
 
-                camera_height_y = float(tvecs_y[0][2][0])
+                print(f"📏 Original coords - Height: {camera_height1:.2f}m, Error: {mean_error1:.2f}px")
 
-                if 0 < camera_height_y < 30:
-                    ret, camera_matrix, dist_coeffs, rvecs, tvecs = ret_y, camera_matrix_y, dist_coeffs_y, rvecs_y, tvecs_y
+                calibration_attempts.append({
+                    'method': 'original',
+                    'ret': ret1, 'camera_matrix': camera_matrix1, 'dist_coeffs': dist_coeffs1,
+                    'rvecs': rvecs1, 'tvecs': tvecs1, 'error': mean_error1, 'height': camera_height1,
+                    'object_points_used': object_points
+                })
 
-        except Exception:
-            # Fallback to basic calibration with restricted flags
-            flags_fallback = (cv2.CALIB_USE_INTRINSIC_GUESS |
-                              cv2.CALIB_FIX_PRINCIPAL_POINT |
-                              cv2.CALIB_FIX_ASPECT_RATIO |
-                              cv2.CALIB_ZERO_TANGENT_DIST |
-                              cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3 |
-                              cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5 | cv2.CALIB_FIX_K6)
-            ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-                object_points, image_points, image_size,
-                camera_matrix_init, None, flags=flags_fallback
+        except Exception as e:
+            print(f"⚠️  Original calibration failed: {e}")
+
+        # Method 2: Try Y-axis flip
+        try:
+            print("📐 Method 2: Attempting calibration with Y-axis flipped coordinates...")
+            object_points_y_flip = object_points.copy()
+            max_y = np.max(object_points_y_flip[0, :, 1])
+            object_points_y_flip[0, :, 1] = max_y - object_points_y_flip[0, :, 1]
+
+            ret2, camera_matrix2, dist_coeffs2, rvecs2, tvecs2 = cv2.calibrateCamera(
+                object_points_y_flip, image_points, image_size,
+                camera_matrix_init, dist_coeffs_init, flags=flags
             )
 
-        if not ret:
-            raise ValueError("Camera calibration failed")
+            if ret2:
+                # Calculate reprojection error for Y-flipped
+                projected_points2, _ = cv2.projectPoints(
+                    object_points_y_flip[0], rvecs2[0], tvecs2[0], camera_matrix2, dist_coeffs2
+                )
+                projected_points2 = projected_points2.reshape(-1, 2)
+                errors2 = np.sqrt(np.sum((image_points[0] - projected_points2)**2, axis=1))
+                mean_error2 = np.mean(errors2)
+                camera_height2 = float(tvecs2[0][2][0])
 
-        # Calculate reprojection errors
+                print(f"📏 Y-flipped coords - Height: {camera_height2:.2f}m, Error: {mean_error2:.2f}px")
+
+                calibration_attempts.append({
+                    'method': 'y_flipped',
+                    'ret': ret2, 'camera_matrix': camera_matrix2, 'dist_coeffs': dist_coeffs2,
+                    'rvecs': rvecs2, 'tvecs': tvecs2, 'error': mean_error2, 'height': camera_height2,
+                    'object_points_used': object_points_y_flip
+                })
+
+        except Exception as e:
+            print(f"⚠️  Y-flipped calibration failed: {e}")
+
+        # Method 3: Fallback with restricted flags
+        if not calibration_attempts:
+            try:
+                print("📐 Method 3: Fallback calibration with restricted flags...")
+                flags_fallback = (cv2.CALIB_USE_INTRINSIC_GUESS |
+                                  cv2.CALIB_FIX_PRINCIPAL_POINT |
+                                  cv2.CALIB_FIX_ASPECT_RATIO |
+                                  cv2.CALIB_ZERO_TANGENT_DIST |
+                                  cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3 |
+                                  cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5 | cv2.CALIB_FIX_K6)
+
+                ret3, camera_matrix3, dist_coeffs3, rvecs3, tvecs3 = cv2.calibrateCamera(
+                    object_points, image_points, image_size,
+                    camera_matrix_init, None, flags=flags_fallback
+                )
+
+                if ret3:
+                    projected_points3, _ = cv2.projectPoints(
+                        object_points[0], rvecs3[0], tvecs3[0], camera_matrix3, dist_coeffs3
+                    )
+                    projected_points3 = projected_points3.reshape(-1, 2)
+                    errors3 = np.sqrt(np.sum((image_points[0] - projected_points3)**2, axis=1))
+                    mean_error3 = np.mean(errors3)
+                    camera_height3 = float(tvecs3[0][2][0])
+
+                    print(f"📏 Fallback coords - Height: {camera_height3:.2f}m, Error: {mean_error3:.2f}px")
+
+                    calibration_attempts.append({
+                        'method': 'fallback',
+                        'ret': ret3, 'camera_matrix': camera_matrix3, 'dist_coeffs': dist_coeffs3,
+                        'rvecs': rvecs3, 'tvecs': tvecs3, 'error': mean_error3, 'height': camera_height3,
+                        'object_points_used': object_points
+                    })
+
+            except Exception as e:
+                print(f"⚠️  Fallback calibration failed: {e}")
+
+        if not calibration_attempts:
+            raise ValueError("All calibration methods failed")
+
+        # IMPROVED SELECTION LOGIC: Select best calibration based on error AND reasonable height
+        print(f"\n🔍 Comparing {len(calibration_attempts)} calibration attempts...")
+
+        # Filter for reasonable heights first (5-50 meters)
+        reasonable_attempts = [attempt for attempt in calibration_attempts
+                               if 5 < attempt['height'] < 50]
+
+        if reasonable_attempts:
+            # Among reasonable heights, pick the one with lowest error
+            best_attempt = min(reasonable_attempts, key=lambda x: x['error'])
+            print(f"✅ Selected {best_attempt['method']} method (reasonable height + lowest error)")
+        else:
+            # If no reasonable heights, just pick lowest error
+            best_attempt = min(calibration_attempts, key=lambda x: x['error'])
+            print(f"⚠️  No reasonable heights found, selected {best_attempt['method']} method (lowest error)")
+
+        # Use the best calibration
+        ret = best_attempt['ret']
+        camera_matrix = best_attempt['camera_matrix']
+        dist_coeffs = best_attempt['dist_coeffs']
+        rvecs = best_attempt['rvecs']
+        tvecs = best_attempt['tvecs']
+        mean_error = best_attempt['error']
+        method_used = best_attempt['method']
+
+        # Calculate final individual point errors using the correct object points
+        object_points_final = best_attempt['object_points_used']
         projected_points, _ = cv2.projectPoints(
-            object_points[0], rvecs[0], tvecs[0], camera_matrix, dist_coeffs
+            object_points_final[0], rvecs[0], tvecs[0], camera_matrix, dist_coeffs
         )
         projected_points = projected_points.reshape(-1, 2)
         errors = np.sqrt(np.sum((image_points[0] - projected_points)**2, axis=1))
-        mean_error = np.mean(errors)
+        mean_error = np.mean(errors)  # Recalculate to be sure
+
+        print(f"✅ Calibration completed successfully using {method_used} method!")
+        print(f"📊 Final reprojection error: {mean_error:.2f} pixels")
+        print(f"📏 Final camera height: {tvecs[0][2][0]:.2f} meters")
+        print(f"🔍 Final focal length: {camera_matrix[0,0]:.0f} pixels")
+        print(f"📐 Distortion coefficients: {len(dist_coeffs.flatten())} parameters")
 
         return {
             'camera_matrix': camera_matrix,
@@ -220,11 +337,12 @@ class StreamlinedBadmintonCalibrator:
             'point_names': point_names,
             'point_errors': {name: float(error) for name, error in zip(point_names, errors)},
             'detected_points': detected_points,
-            'image_size': image_size
+            'image_size': image_size,
+            'calibration_method': method_used
         }
 
     def save_complete_calibration_csv(self, calibration_results: Dict, output_path: str) -> None:
-        """Save all calibration data to a single CSV file."""
+        """Save all calibration data to a single CSV file with improved method tracking."""
 
         with open(output_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -232,6 +350,8 @@ class StreamlinedBadmintonCalibrator:
             # Header section
             writer.writerow(['# Badminton Court Calibration Results'])
             writer.writerow(['# Generated by Enhanced BWF Court Calibrator'])
+            method_used = calibration_results.get('calibration_method', 'unknown')
+            writer.writerow([f'# Calibration method: {method_used}'])
             writer.writerow([''])
 
             # Camera intrinsic parameters
@@ -267,6 +387,7 @@ class StreamlinedBadmintonCalibrator:
             writer.writerow(['image_width', calibration_results['image_size'][0]])
             writer.writerow(['image_height', calibration_results['image_size'][1]])
             writer.writerow(['num_points_used', len(calibration_results['point_names'])])
+            writer.writerow(['calibration_method', method_used])
             writer.writerow([''])
 
             # Detected court points with errors
@@ -305,19 +426,33 @@ def get_video_frame_size(video_path: str) -> Tuple[int, int]:
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
     cap.release()
 
+    print(f"📐 Video specs: {width}x{height}, {frame_count} frames @ {fps:.1f}fps")
     return (width, height)
 
 
 def main(video_path, debug=False):
     """Main function for streamlined badminton court camera calibration."""
+    print("🚀 Starting Enhanced Badminton Court Calibration")
+    print("="*60)
+
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     result_dir = os.path.join("results/", f"{base_name}")
     os.makedirs(result_dir, exist_ok=True)
 
+    print(f"🎬 Processing video: {video_path}")
+    print(f"💾 Results directory: {result_dir}")
+
     # Run court detection
     court_csv_path = os.path.join(result_dir, "court.csv")
+
+    print("\n" + "="*60)
+    print("STEP 1: COURT DETECTION")
+    print("="*60)
 
     if not run_detect_script(video_path, court_csv_path):
         raise RuntimeError("Court detection failed")
@@ -325,35 +460,71 @@ def main(video_path, debug=False):
     if not os.path.exists(court_csv_path):
         raise RuntimeError(f"Court detection output not found: {court_csv_path}")
 
+    print("✅ Court detection completed")
+
     # Get video frame size
+    print("\n" + "="*60)
+    print("STEP 2: VIDEO ANALYSIS")
+    print("="*60)
+
     image_size = get_video_frame_size(video_path)
 
     # Initialize calibrator
+    print("\n" + "="*60)
+    print("STEP 3: CALIBRATOR SETUP")
+    print("="*60)
+
     calibrator = StreamlinedBadmintonCalibrator(debug=debug)
+    print("✅ Calibrator initialized with BWF standard court dimensions")
 
     # Load detected court points
+    print("\n" + "="*60)
+    print("STEP 4: POINT LOADING")
+    print("="*60)
+
     detected_court_points = calibrator.load_court_points_from_csv(court_csv_path)
 
     if len(detected_court_points) < 4:
         raise RuntimeError(f"Insufficient court points detected: {len(detected_court_points)}")
 
     # Perform camera calibration
+    print("\n" + "="*60)
+    print("STEP 5: CAMERA CALIBRATION")
+    print("="*60)
+
     calibration_results = calibrator.calibrate_camera(detected_court_points, image_size)
 
     # Save complete results to single CSV
+    print("\n" + "="*60)
+    print("STEP 6: RESULTS GENERATION")
+    print("="*60)
+
     output_csv_path = os.path.join(result_dir, f"{base_name}_calibration_complete.csv")
     calibrator.save_complete_calibration_csv(calibration_results, output_csv_path)
 
+    # Final summary
+    print("\n" + "="*60)
+    print("CALIBRATION SUMMARY")
+    print("="*60)
+
+    reprojection_error = calibration_results['reprojection_error']
+    camera_height = calibration_results['tvec'][2]
+    num_points = len(calibration_results['point_names'])
+    focal_length = calibration_results['camera_matrix'][0,0]
+    method_used = calibration_results.get('calibration_method', 'unknown')
+
     print(f"✅ Complete calibration saved to: {output_csv_path}")
-    print(f"📊 Reprojection error: {calibration_results['reprojection_error']:.2f} pixels")
-    print(f"📏 Camera height: {calibration_results['tvec'][2]:.1f} meters")
-    print(f"🎯 Points used: {len(calibration_results['point_names'])}")
+    print(f"📊 Reprojection error: {reprojection_error:.2f} pixels")
+    print(f"📏 Camera height: {camera_height:.1f} meters")
+    print(f"🎯 Points used: {num_points}")
+    print(f"🔍 Focal length: {focal_length:.0f} pixels")
+    print(f"🔧 Method used: {method_used}")
 
     return True
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Streamlined badminton court camera calibration")
+    parser = argparse.ArgumentParser(description="Enhanced badminton court camera calibration")
     parser.add_argument("video_path", type=str, help="Path to the input video")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
