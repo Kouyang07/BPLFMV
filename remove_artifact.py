@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Unified Jump Analysis Script with Court-Based Player Matching
+Ankle-Only Jump Analysis Script with Court-Based Player Matching
 
 Uses ML model to detect valid jumps, then matches players using court coordinates
-to find specific jumping player and correct their position displacement.
+to find specific jumping player and correct their ankle position displacement.
 
 Usage:
-    python unified_jump_analyzer.py samples/test.mp4
+    python ankle_only_jump_analyzer.py samples/test.mp4
 """
 
 import cv2
@@ -157,7 +157,7 @@ def find_valid_smash_frames(frame_detections, window_size=10):
     return valid_frames
 
 def load_position_data(video_path):
-    """Load position data and extract homography matrix."""
+    """Load ankle-only position data and extract homography matrix."""
     base_name = Path(video_path).stem
     result_dir = Path("results") / base_name
     position_json_path = result_dir / "positions.json"
@@ -165,7 +165,7 @@ def load_position_data(video_path):
     try:
         with open(position_json_path, 'r') as f:
             data = json.load(f)
-        print(f"✅ Loaded position data from: {position_json_path}")
+        print(f"✅ Loaded ankle position data from: {position_json_path}")
 
         # Extract homography matrix from court points
         homography_matrix = calculate_homography_from_court_points(data.get('court_points', {}))
@@ -218,87 +218,46 @@ def transform_point_to_court(pixel_point, homography_matrix):
     return float(world_point[0][0][0]), float(world_point[0][0][1])
 
 def get_player_court_position(position_data, frame_index, player_id, homography_matrix):
-    """Get player's court position for a specific frame."""
+    """Get player's ankle-based court position for a specific frame."""
     for pos in position_data["player_positions"]:
         if pos['frame_index'] == frame_index and pos.get('player_id') == player_id:
-            # Use weighted world coordinates directly if available
-            hip_x = pos.get('hip_world_X')
-            hip_y = pos.get('hip_world_Y')
-            if hip_x is not None and hip_y is not None:
-                return float(hip_x), float(hip_y)
+            # Use ankle-only coordinates (x, y) if available
+            if 'x' in pos and 'y' in pos:
+                return float(pos['x']), float(pos['y'])
+            # Fallback to legacy hip coordinates if available
+            elif 'hip_world_X' in pos and 'hip_world_Y' in pos:
+                return float(pos['hip_world_X']), float(pos['hip_world_Y'])
     return None, None
 
-def calculate_weighted_position(hip_x, hip_y, left_ankle_x, left_ankle_y, right_ankle_x, right_ankle_y):
-    """Calculate weighted average position using hip and ankle coordinates."""
-    positions_x = []
-    positions_y = []
-    weights = []
-
-    if hip_x is not None and hip_y is not None:
-        positions_x.append(hip_x)
-        positions_y.append(hip_y)
-        weights.append(0.7)
-
-    if left_ankle_x is not None and left_ankle_y is not None:
-        positions_x.append(left_ankle_x)
-        positions_y.append(left_ankle_y)
-        weights.append(0.15)
-
-    if right_ankle_x is not None and right_ankle_y is not None:
-        positions_x.append(right_ankle_x)
-        positions_y.append(right_ankle_y)
-        weights.append(0.15)
-
-    if not positions_x:
-        return None, None
-
-    total_weight = sum(weights)
-    if total_weight > 0:
-        normalized_weights = [w / total_weight for w in weights]
-    else:
-        return None, None
-
-    weighted_x = sum(pos * weight for pos, weight in zip(positions_x, normalized_weights))
-    weighted_y = sum(pos * weight for pos, weight in zip(positions_y, normalized_weights))
-
-    return weighted_x, weighted_y
-
 def extract_player_coordinates(player_positions):
-    """Extract player coordinate trajectories using weighted averaging."""
+    """Extract player coordinate trajectories for ankle-only data."""
     coordinates = defaultdict(lambda: {
-        'frames': [], 'weighted_x': [], 'weighted_y': [],
-        'hip_x': [], 'hip_y': [], 'left_ankle_x': [], 'left_ankle_y': [],
-        'right_ankle_x': [], 'right_ankle_y': []
+        'frames': [], 'x': [], 'y': []
     })
 
-    print("Extracting player coordinates...")
+    print("Extracting ankle player coordinates...")
     for pos in tqdm(player_positions, desc="Processing player positions", unit="position"):
         player_id = pos.get('player_id')
         if player_id is None:
             continue
 
         frame_idx = pos['frame_index']
-        hip_x = pos.get('hip_world_X')
-        hip_y = pos.get('hip_world_Y')
-        left_ankle_x = pos.get('left_ankle_world_X')
-        left_ankle_y = pos.get('left_ankle_world_Y')
-        right_ankle_x = pos.get('right_ankle_world_X')
-        right_ankle_y = pos.get('right_ankle_world_Y')
 
-        weighted_x, weighted_y = calculate_weighted_position(
-            hip_x, hip_y, left_ankle_x, left_ankle_y, right_ankle_x, right_ankle_y
-        )
+        # Handle ankle-only format
+        if 'x' in pos and 'y' in pos:
+            x = pos['x']
+            y = pos['y']
+        # Fallback to legacy hip format
+        elif 'hip_world_X' in pos and 'hip_world_Y' in pos:
+            x = pos['hip_world_X']
+            y = pos['hip_world_Y']
+        else:
+            continue
 
-        if weighted_x is not None and weighted_y is not None:
+        if x is not None and y is not None:
             coordinates[player_id]['frames'].append(frame_idx)
-            coordinates[player_id]['weighted_x'].append(weighted_x)
-            coordinates[player_id]['weighted_y'].append(weighted_y)
-            coordinates[player_id]['hip_x'].append(hip_x if hip_x is not None else 0)
-            coordinates[player_id]['hip_y'].append(hip_y if hip_y is not None else 0)
-            coordinates[player_id]['left_ankle_x'].append(left_ankle_x if left_ankle_x is not None else 0)
-            coordinates[player_id]['left_ankle_y'].append(left_ankle_y if left_ankle_y is not None else 0)
-            coordinates[player_id]['right_ankle_x'].append(right_ankle_x if right_ankle_x is not None else 0)
-            coordinates[player_id]['right_ankle_y'].append(right_ankle_y if right_ankle_y is not None else 0)
+            coordinates[player_id]['x'].append(x)
+            coordinates[player_id]['y'].append(y)
 
     # Convert to numpy arrays and sort by frame
     for player_id in coordinates:
@@ -342,7 +301,7 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
         print("No ML jumps to correlate")
         return correlations
 
-    print("Correlating ML jumps with players...")
+    print("Correlating ML jumps with ankle players...")
     for ml_jump in tqdm(ml_jumps, desc="Correlating jumps", unit="jump"):
         ml_frame = ml_jump['frame']
         ml_bottom_x = ml_jump['bottom_center_x']
@@ -398,10 +357,10 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
             # Find position-based jump for this player
             coord_data = coordinates[best_match]
             frames = coord_data['frames']
-            weighted_y = coord_data['weighted_y']
+            y_coords = coord_data['y']
 
-            if len(weighted_y) >= 10:
-                peaks, valleys = find_peaks_and_valleys(weighted_y, frames)
+            if len(y_coords) >= 10:
+                peaks, valleys = find_peaks_and_valleys(y_coords, frames)
 
                 # Find closest valley to ML jump
                 nearby_valleys = [(f, y, idx) for f, y, idx in valleys
@@ -423,9 +382,9 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
                         end_frame_idx = np.where(frames == end[0])[0]
 
                         if len(begin_frame_idx) > 0 and len(end_frame_idx) > 0:
-                            weighted_x = coord_data['weighted_x']
-                            begin_x = weighted_x[begin_frame_idx[0]]
-                            end_x = weighted_x[end_frame_idx[0]]
+                            x_coords = coord_data['x']
+                            begin_x = x_coords[begin_frame_idx[0]]
+                            end_x = x_coords[end_frame_idx[0]]
 
                             correlations.append({
                                 'player_id': best_match,
@@ -460,24 +419,20 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
 
     return correlations
 
-def interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame):
-    """Interpolate position components between begin and end frames."""
+def interpolate_ankle_positions(begin_data, end_data, frame, begin_frame, end_frame):
+    """Interpolate ankle position between begin and end frames."""
     if end_frame == begin_frame:
         t = 0
     else:
         t = (frame - begin_frame) / (end_frame - begin_frame)
 
     return {
-        'hip_x': float(begin_data['hip_x'] + t * (end_data['hip_x'] - begin_data['hip_x'])),
-        'hip_y': float(begin_data['hip_y'] + t * (end_data['hip_y'] - begin_data['hip_y'])),
-        'left_ankle_x': float(begin_data['left_ankle_x'] + t * (end_data['left_ankle_x'] - begin_data['left_ankle_x'])),
-        'left_ankle_y': float(begin_data['left_ankle_y'] + t * (end_data['left_ankle_y'] - begin_data['left_ankle_y'])),
-        'right_ankle_x': float(begin_data['right_ankle_x'] + t * (end_data['right_ankle_x'] - begin_data['right_ankle_x'])),
-        'right_ankle_y': float(begin_data['right_ankle_y'] + t * (end_data['right_ankle_y'] - begin_data['right_ankle_y']))
+        'x': float(begin_data['x'] + t * (end_data['x'] - begin_data['x'])),
+        'y': float(begin_data['y'] + t * (end_data['y'] - begin_data['y']))
     }
 
 def save_corrected_positions(original_position_data, correlations, coordinates, output_dir):
-    """Save corrected position data with interpolated jump sequences."""
+    """Save corrected ankle position data with interpolated jump sequences."""
     # Always copy original data first
     corrected_data = json.loads(json.dumps(original_position_data))
 
@@ -485,6 +440,7 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
     corrected_data['correction_metadata'] = {
         'jumps_detected': len(correlations),
         'correction_applied': len(correlations) > 0,
+        'tracking_method': 'ankle_only',
         'timestamp': str(np.datetime64('now'))
     }
 
@@ -493,7 +449,7 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
         output_path = output_dir / "corrected_positions.json"
         with open(output_path, 'w') as f:
             json.dump(corrected_data, f, indent=2)
-        print(f"✅ Saved uncorrected positions to: {output_path}")
+        print(f"✅ Saved uncorrected ankle positions to: {output_path}")
         return
 
     # Create lookup for quick position access
@@ -504,13 +460,13 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
 
     total_interpolated_frames = 0
 
-    print("Applying corrections...")
-    for corr in tqdm(correlations, desc="Interpolating jumps", unit="jump"):
+    print("Applying ankle corrections...")
+    for corr in tqdm(correlations, desc="Interpolating ankle jumps", unit="jump"):
         player_id = corr['player_id']
         begin_frame = corr['begin_frame']
         end_frame = corr['end_frame']
 
-        print(f"\nInterpolating Player {player_id}: frames {begin_frame} to {end_frame}")
+        print(f"\nInterpolating Player {player_id} ankles: frames {begin_frame} to {end_frame}")
 
         coord_data = coordinates[player_id]
         frames = coord_data['frames']
@@ -528,44 +484,45 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
 
         # Extract position data for interpolation
         begin_data = {
-            'hip_x': coord_data['hip_x'][begin_idx],
-            'hip_y': coord_data['hip_y'][begin_idx],
-            'left_ankle_x': coord_data['left_ankle_x'][begin_idx],
-            'left_ankle_y': coord_data['left_ankle_y'][begin_idx],
-            'right_ankle_x': coord_data['right_ankle_x'][begin_idx],
-            'right_ankle_y': coord_data['right_ankle_y'][begin_idx]
+            'x': coord_data['x'][begin_idx],
+            'y': coord_data['y'][begin_idx]
         }
 
         end_data = {
-            'hip_x': coord_data['hip_x'][end_idx],
-            'hip_y': coord_data['hip_y'][end_idx],
-            'left_ankle_x': coord_data['left_ankle_x'][end_idx],
-            'left_ankle_y': coord_data['left_ankle_y'][end_idx],
-            'right_ankle_x': coord_data['right_ankle_x'][end_idx],
-            'right_ankle_y': coord_data['right_ankle_y'][end_idx]
+            'x': coord_data['x'][end_idx],
+            'y': coord_data['y'][end_idx]
         }
 
         # Interpolate between begin and end frames
         frames_interpolated = 0
         for frame in range(begin_frame, end_frame + 1):
-            interpolated = interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame)
+            interpolated = interpolate_ankle_positions(begin_data, end_data, frame, begin_frame, end_frame)
 
             key = (player_id, frame)
             if key in position_lookup:
                 pos_idx = position_lookup[key]
                 pos = corrected_data["player_positions"][pos_idx]
 
-                # Update position components
-                pos['hip_world_X'] = interpolated['hip_x']
-                pos['hip_world_Y'] = interpolated['hip_y']
-                pos['left_ankle_world_X'] = interpolated['left_ankle_x']
-                pos['left_ankle_world_Y'] = interpolated['left_ankle_y']
-                pos['right_ankle_world_X'] = interpolated['right_ankle_x']
-                pos['right_ankle_world_Y'] = interpolated['right_ankle_y']
+                # Update ankle position components
+                if 'x' in pos and 'y' in pos:
+                    # Ankle-only format
+                    pos['x'] = interpolated['x']
+                    pos['y'] = interpolated['y']
+                elif 'hip_world_X' in pos and 'hip_world_Y' in pos:
+                    # Legacy format fallback
+                    pos['hip_world_X'] = interpolated['x']
+                    pos['hip_world_Y'] = interpolated['y']
+                    # Also update ankle positions if they exist
+                    if 'left_ankle_world_X' in pos:
+                        pos['left_ankle_world_X'] = interpolated['x']
+                        pos['left_ankle_world_Y'] = interpolated['y']
+                    if 'right_ankle_world_X' in pos:
+                        pos['right_ankle_world_X'] = interpolated['x']
+                        pos['right_ankle_world_Y'] = interpolated['y']
 
                 frames_interpolated += 1
 
-        print(f"  ✅ Interpolated {frames_interpolated} frames")
+        print(f"  ✅ Interpolated {frames_interpolated} ankle frames")
         total_interpolated_frames += frames_interpolated
 
     # Save corrected data
@@ -573,11 +530,11 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
     with open(output_path, 'w') as f:
         json.dump(corrected_data, f, indent=2)
 
-    print(f"\n✅ Saved corrected positions to: {output_path}")
-    print(f"Summary: Interpolated {total_interpolated_frames} frames across {len(correlations)} jump sequences")
+    print(f"\n✅ Saved corrected ankle positions to: {output_path}")
+    print(f"Summary: Interpolated {total_interpolated_frames} ankle frames across {len(correlations)} jump sequences")
 
 def main():
-    parser = argparse.ArgumentParser(description='Unified jump analysis with court-based player matching')
+    parser = argparse.ArgumentParser(description='Ankle-only jump analysis with court-based player matching')
     parser.add_argument('video_path', help='Path to the input video file')
     parser.add_argument('--model', default='resources/BLPFMV.pt', help='Path to YOLO model weights')
     parser.add_argument('--confidence', type=float, default=0.2, help='ML detection confidence threshold')
@@ -613,24 +570,24 @@ def main():
             timestamp = frame / fps
             print(f"  {i}. Frame {frame:4d} | Time: {timestamp:6.2f}s | Confidence: {confidence:.3f}")
 
-        # Step 2: Load position data and homography
+        # Step 2: Load ankle position data and homography
         print("\n" + "="*50)
-        print("STEP 2: LOADING POSITION DATA")
+        print("STEP 2: LOADING ANKLE POSITION DATA")
         print("="*50)
 
         position_data, output_dir, homography_matrix = load_position_data(args.video_path)
         if not position_data:
-            print("❌ Position data unavailable. Cannot proceed.")
+            print("❌ Ankle position data unavailable. Cannot proceed.")
             return 1
 
         coordinates = extract_player_coordinates(position_data["player_positions"])
-        print(f"Found {len(coordinates)} players with position data")
+        print(f"Found {len(coordinates)} players with ankle position data")
 
         # Step 3: Court-based player matching (only if we have both ML jumps and homography)
         correlations = []
         if ml_jumps and homography_matrix is not None:
             print("\n" + "="*50)
-            print("STEP 3: COURT-BASED PLAYER MATCHING")
+            print("STEP 3: COURT-BASED ANKLE PLAYER MATCHING")
             print("="*50)
 
             correlations = correlate_ml_jumps_with_players(
@@ -638,7 +595,7 @@ def main():
                 args.proximity, args.court_distance
             )
 
-            print(f"\n📊 CORRELATION SUMMARY")
+            print(f"\n📊 ANKLE CORRELATION SUMMARY")
             print(f"Found {len(correlations)} valid correlations:")
             for i, corr in enumerate(correlations, 1):
                 print(f"  {i}. Player {corr['player_id']} | "
@@ -653,24 +610,24 @@ def main():
 
         # Step 4: Always save corrected positions (even if no corrections applied)
         print("\n" + "="*50)
-        print("STEP 4: SAVING CORRECTED POSITIONS")
+        print("STEP 4: SAVING CORRECTED ANKLE POSITIONS")
         print("="*50)
 
         save_corrected_positions(position_data, correlations, coordinates, output_dir)
 
         # Summary
         print("\n" + "="*50)
-        print("PROCESSING COMPLETE")
+        print("ANKLE PROCESSING COMPLETE")
         print("="*50)
 
         if correlations:
             print(f"✅ Successfully processed {len(ml_jumps)} ML detections")
-            print(f"✅ Applied {len(correlations)} jump corrections")
-            print(f"✅ Corrected positions saved to: {output_dir / 'corrected_positions.json'}")
+            print(f"✅ Applied {len(correlations)} ankle jump corrections")
+            print(f"✅ Corrected ankle positions saved to: {output_dir / 'corrected_positions.json'}")
         else:
             print(f"ℹ️  Processed {len(ml_jumps)} ML detections")
-            print(f"ℹ️  No corrections applied (no valid correlations found)")
-            print(f"✅ Original positions saved as corrected data to: {output_dir / 'corrected_positions.json'}")
+            print(f"ℹ️  No ankle corrections applied (no valid correlations found)")
+            print(f"✅ Original ankle positions saved as corrected data to: {output_dir / 'corrected_positions.json'}")
 
         return 0
 

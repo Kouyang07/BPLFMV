@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Enhanced Universal Visualization Script for BPLFMV Structure with Sophisticated Court Design
+Enhanced Universal Visualization Script for BPLFMV Structure with Ankle-Only Support
 
-Enhanced court features:
-1. Complete badminton court lines with proper measurements
-2. Minimalistic but comprehensive design
-3. Professional court appearance with proper proportions
-4. Clear visual hierarchy for different line types
-5. Enhanced color scheme for better visibility
+Modified to handle ankle-only tracking data without hip points:
+- Stage 3: Enhanced 3D position tracking (ankle-only support)
+- Stage 4: Enhanced corrected position comparison (ankle-only support)
+- Backward compatible with hip-based data formats
+- Clean visualization for simplified tracking results
 
 Handles different data formats:
 - Stage 1: court.csv → Court detection visualization
 - Stage 2: pose.json → Pose estimation visualization
-- Stage 3: positions.json → 3D position tracking visualization
-- Stage 4: corrected_positions.json → Jump correction comparison (using player_id)
+- Stage 3: positions.json → 3D position tracking visualization (ankle-only compatible)
+- Stage 4: corrected_positions.json → Jump correction comparison (ankle-only compatible)
 """
 
 import sys
@@ -266,9 +265,7 @@ class VideoProcessor:
             cv2.putText(panel, time_str, (200, 50),
                         font, font_scale, text_color, font_thickness)
 
-        # Combine with court
-        enhanced_court = np.vstack([court_img, panel])
-        return enhanced_court
+        return np.vstack([court_img, panel])
 
 def load_json_data(file_path: str) -> Dict[str, Any]:
     """Load JSON data"""
@@ -479,7 +476,7 @@ def process_stage2_batch(args):
     return processed_frames
 
 def process_stage3_batch(args):
-    """Process batch for stage 3 with enhanced 3D visualization"""
+    """Process batch for stage 3 with individual ankle visualization"""
     (batch_frames, positions_by_frame, image_points, court_template,
      processor, out_h, out_w) = args
     processed_frames = []
@@ -498,69 +495,151 @@ def process_stage3_batch(args):
         # Enhanced frame info
         cv2.rectangle(frame_display, (0, 0), (450, 60), (0, 0, 0), -1)
         cv2.rectangle(frame_display, (0, 0), (450, 60), (100, 150, 255), 2)
-        cv2.putText(frame_display, f"3D TRACKING - Frame: {frame_idx}", (10, 25),
+        cv2.putText(frame_display, f"ANKLE TRACKING - Frame: {frame_idx}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Process positions with enhanced visualization
+        # Process positions with individual ankle visualization
         frame_players = positions_by_frame.get(frame_idx, [])
         active_players = 0
+        total_ankles = 0
 
         for pos_data in frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
+            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
             color = processor.get_color(player_id)
 
-            # Check format and draw positions
-            if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Old format
-                position_types = [
-                    ("hip_world_X", "hip_world_Y", "Hip", color, 8, True),
-                    ("left_ankle_world_X", "left_ankle_world_Y", "LA", (0, 255, 255), 5, False),
-                    ("right_ankle_world_X", "right_ankle_world_Y", "RA", (255, 255, 0), 5, False)
-                ]
-            else:
-                # New format
-                position_types = []
-                if "x" in pos_data and "y" in pos_data:
-                    position_types.append(("x", "y", "Pos", color, 8, True))
-                if "hip_x" in pos_data and "hip_y" in pos_data:
-                    position_types.append(("hip_x", "hip_y", "Hip", color, 8, True))
-                if "left_ankle_x" in pos_data and "left_ankle_y" in pos_data:
-                    position_types.append(("left_ankle_x", "left_ankle_y", "LA", (0, 255, 255), 5, False))
-                if "right_ankle_x" in pos_data and "right_ankle_y" in pos_data:
-                    position_types.append(("right_ankle_x", "right_ankle_y", "RA", (255, 255, 0), 5, False))
+            # Determine data format and extract individual ankle positions
+            ankle_count = pos_data.get("ankle_count", 0)
+            method_used = pos_data.get("method", "unknown")
 
-            player_has_position = False
-            for x_key, y_key, label, pos_color, radius, is_main in position_types:
-                if x_key in pos_data and y_key in pos_data:
-                    # Flip x-coordinate for reflection about y-axis
-                    world_x = processor.court_width_m - pos_data[x_key]
-                    world_y = pos_data[y_key]
-                    px, py = processor.world_to_court(world_x, world_y)
+            # Individual ankle positions to draw
+            ankle_positions = []
+            main_position = None
 
-                    # Enhanced position markers
-                    cv2.circle(court_img, (px, py), radius + 2, (255, 255, 255), -1)
-                    cv2.circle(court_img, (px, py), radius, pos_color, -1)
+            # Check for new ankle-only format
+            if "x" in pos_data and "y" in pos_data:
+                # This is the averaged position - we need to find individual ankles
+                # For now, show the averaged position prominently
+                world_x = processor.court_width_m - pos_data["x"]
+                world_y = pos_data["y"]
+                main_position = (world_x, world_y)
 
-                    if is_main:
-                        # Add player shadow/trail effect
-                        cv2.circle(court_img, (px, py), radius + 6, (*pos_color[:2], min(255, pos_color[2] + 50)), 1)
-                        player_has_position = True
+                px, py = processor.world_to_court(world_x, world_y)
 
-                    # Enhanced labels with background
-                    label_text = f"P{player_id}-{label}"
-                    text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-                    cv2.rectangle(court_img, (px - 25, py - 25), (px + text_size[0] + 5, py - 10), (0, 0, 0), -1)
-                    cv2.putText(court_img, label_text, (px - 20, py - 15),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, pos_color, 1)
+                # Draw main averaged ankle position (larger)
+                cv2.circle(court_img, (px, py), 12, (255, 255, 255), -1)  # White border
+                cv2.circle(court_img, (px, py), 10, color, -1)             # Player color
+                cv2.circle(court_img, (px, py), 15, color, 2)              # Outer ring
 
-            if player_has_position:
+                # Method indicator
+                method_color = {
+                    'calibrated_3d': (0, 255, 0),
+                    'enhanced_homography': (255, 255, 0),
+                    'basic_homography': (255, 100, 0)
+                }.get(method_used, (128, 128, 128))
+
+                cv2.circle(court_img, (px - 18, py - 18), 4, method_color, -1)
+
+                # Enhanced label with ankle count and method
+                label_text = f"P{player_id} ({ankle_count}A)"
+                method_text = method_used.split('_')[0].upper()  # "CALIBRATED", "ENHANCED", "BASIC"
+
+                # Main label background
+                text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                cv2.rectangle(court_img, (px - 35, py - 45), (px + text_size[0] + 10, py - 20), (0, 0, 0), -1)
+                cv2.rectangle(court_img, (px - 35, py - 45), (px + text_size[0] + 10, py - 20), color, 2)
+                cv2.putText(court_img, label_text, (px - 30, py - 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                # Method label (smaller, below)
+                method_size = cv2.getTextSize(method_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                cv2.rectangle(court_img, (px - 25, py - 18), (px + method_size[0] + 5, py - 5), (0, 0, 0), -1)
+                cv2.putText(court_img, method_text, (px - 20, py - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, method_color, 1)
+
+                active_players += 1
+                total_ankles += ankle_count
+
+            # Legacy format support (hip-based) - show individual ankle positions
+            elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                # Hip position (main marker)
+                hip_world_x = processor.court_width_m - pos_data["hip_world_X"]
+                hip_world_y = pos_data["hip_world_Y"]
+                main_position = (hip_world_x, hip_world_y)
+
+                hip_px, hip_py = processor.world_to_court(hip_world_x, hip_world_y)
+
+                # Hip position marker (smaller than ankle-only)
+                cv2.circle(court_img, (hip_px, hip_py), 8, (255, 255, 255), -1)
+                cv2.circle(court_img, (hip_px, hip_py), 6, color, -1)
+
+                # Individual ankle positions (prominent)
+                individual_ankles = []
+
+                if "left_ankle_world_X" in pos_data and "left_ankle_world_Y" in pos_data:
+                    la_x = processor.court_width_m - pos_data["left_ankle_world_X"]
+                    la_y = pos_data["left_ankle_world_Y"]
+                    la_px, la_py = processor.world_to_court(la_x, la_y)
+
+                    # Left ankle marker (cyan)
+                    cv2.circle(court_img, (la_px, la_py), 10, (255, 255, 255), -1)  # White border
+                    cv2.circle(court_img, (la_px, la_py), 8, (0, 255, 255), -1)     # Cyan
+                    cv2.circle(court_img, (la_px, la_py), 12, (0, 255, 255), 2)     # Cyan ring
+
+                    # Left ankle label
+                    cv2.putText(court_img, f"P{player_id}-LA", (la_px - 25, la_py - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                    individual_ankles.append((la_px, la_py, "LA"))
+                    ankle_positions.append((la_px, la_py))
+                    total_ankles += 1
+
+                if "right_ankle_world_X" in pos_data and "right_ankle_world_Y" in pos_data:
+                    ra_x = processor.court_width_m - pos_data["right_ankle_world_X"]
+                    ra_y = pos_data["right_ankle_world_Y"]
+                    ra_px, ra_py = processor.world_to_court(ra_x, ra_y)
+
+                    # Right ankle marker (yellow)
+                    cv2.circle(court_img, (ra_px, ra_py), 10, (255, 255, 255), -1)  # White border
+                    cv2.circle(court_img, (ra_px, ra_py), 8, (0, 255, 255), -1)     # Yellow
+                    cv2.circle(court_img, (ra_px, ra_py), 12, (0, 255, 255), 2)     # Yellow ring
+
+                    # Right ankle label
+                    cv2.putText(court_img, f"P{player_id}-RA", (ra_px - 25, ra_py - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                    individual_ankles.append((ra_px, ra_py, "RA"))
+                    ankle_positions.append((ra_px, ra_py))
+                    total_ankles += 1
+
+                # Connect hip to individual ankles with thin lines
+                for ankle_pos in ankle_positions:
+                    cv2.line(court_img, (hip_px, hip_py), ankle_pos, color, 1)
+
+                # Hip label (smaller)
+                cv2.putText(court_img, f"P{player_id}-Hip", (hip_px - 25, hip_py + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
                 active_players += 1
 
-        # Enhanced court info panel
-        court_img = processor.add_court_info_panel(court_img, frame_idx, active_players, "3D Positions")
+        # Enhanced court info panel with ankle details
+        method_info = ""
+        ankle_info = ""
 
-        # Update frame info
-        cv2.putText(frame_display, f"Active: {active_players}", (10, 50),
+        if frame_players:
+            methods = [pos.get("method", "unknown") for pos in frame_players]
+            unique_methods = list(set(methods))
+            if len(unique_methods) == 1:
+                method_info = f"Method: {unique_methods[0]}"
+            else:
+                method_info = f"Methods: {len(unique_methods)} types"
+
+            ankle_info = f"Total Ankles: {total_ankles}"
+
+        combined_info = f"{method_info} | {ankle_info}" if method_info and ankle_info else (method_info or ankle_info)
+        court_img = processor.add_court_info_panel(court_img, frame_idx, active_players, combined_info)
+
+        # Update frame info with ankle count
+        cv2.putText(frame_display, f"Players: {active_players} | Ankles: {total_ankles}", (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         # Combine frames
@@ -574,7 +653,7 @@ def process_stage3_batch(args):
     return processed_frames
 
 def process_stage4_batch(args):
-    """Process batch for stage 4 with enhanced correction visualization"""
+    """Process batch for stage 4 with ankle-only correction visualization"""
     (batch_frames, corrected_by_frame, original_by_frame, image_points,
      court_template, processor, out_h, out_w, trajectory_history) = args
     processed_frames = []
@@ -593,7 +672,7 @@ def process_stage4_batch(args):
         # Enhanced frame info
         cv2.rectangle(frame_display, (0, 0), (550, 60), (0, 0, 0), -1)
         cv2.rectangle(frame_display, (0, 0), (550, 60), (255, 0, 150), 2)
-        cv2.putText(frame_display, f"JUMP CORRECTION - Frame: {frame_idx}", (10, 25),
+        cv2.putText(frame_display, f"ANKLE CORRECTION - Frame: {frame_idx}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Get frame data
@@ -604,52 +683,79 @@ def process_stage4_batch(args):
         corrections_in_frame = 0
         total_displacement = 0.0
 
-        # Update trajectory history and detect corrections - use flipped coordinates
+        # Update trajectory history for corrected positions
         for pos_data in corrected_frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
+            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
 
-            if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Flip x for reflection
+            # Handle both ankle-only and legacy formats
+            world_x, world_y = None, None
+
+            if "x" in pos_data and "y" in pos_data:
+                # New ankle-only format - flip x for reflection
+                world_x = processor.court_width_m - pos_data["x"]
+                world_y = pos_data["y"]
+            elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                # Legacy format - flip x for reflection
                 world_x = processor.court_width_m - pos_data["hip_world_X"]
                 world_y = pos_data["hip_world_Y"]
-                hip_px, hip_py = processor.world_to_court(world_x, world_y)
+
+            if world_x is not None and world_y is not None:
+                px, py = processor.world_to_court(world_x, world_y)
 
                 # Update trajectory
                 if player_id not in trajectory_history:
                     trajectory_history[player_id] = {'corrected': [], 'original': []}
 
-                trajectory_history[player_id]['corrected'].append((hip_px, hip_py))
-                if len(trajectory_history[player_id]['corrected']) > 50:  # Longer trail
+                trajectory_history[player_id]['corrected'].append((px, py))
+                if len(trajectory_history[player_id]['corrected']) > 50:
                     trajectory_history[player_id]['corrected'] = trajectory_history[player_id]['corrected'][-50:]
 
-        # Process original positions with flip for trajectory
+        # Process original positions for trajectory and correction detection
         for pos_data in original_frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
+            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
 
-            if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Flip x for reflection
-                world_x = processor.court_width_m - pos_data["hip_world_X"]
-                world_y = pos_data["hip_world_Y"]
-                hip_px, hip_py = processor.world_to_court(world_x, world_y)
+            # Handle both formats for original data
+            orig_world_x, orig_world_y = None, None
+
+            if "x" in pos_data and "y" in pos_data:
+                # New ankle-only format - flip x for reflection
+                orig_world_x = processor.court_width_m - pos_data["x"]
+                orig_world_y = pos_data["y"]
+            elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                # Legacy format - flip x for reflection
+                orig_world_x = processor.court_width_m - pos_data["hip_world_X"]
+                orig_world_y = pos_data["hip_world_Y"]
+
+            if orig_world_x is not None and orig_world_y is not None:
+                orig_px, orig_py = processor.world_to_court(orig_world_x, orig_world_y)
 
                 # Update trajectory
                 if player_id not in trajectory_history:
                     trajectory_history[player_id] = {'corrected': [], 'original': []}
 
-                trajectory_history[player_id]['original'].append((hip_px, hip_py))
+                trajectory_history[player_id]['original'].append((orig_px, orig_py))
                 if len(trajectory_history[player_id]['original']) > 50:
                     trajectory_history[player_id]['original'] = trajectory_history[player_id]['original'][-50:]
 
-                # Check for corrections using unflipped world coordinates
+                # Check for corrections using unflipped world coordinates for displacement calculation
                 corrected_pos = next((pos for pos in corrected_frame_players
-                                      if pos.get("player_id", pos.get("tracked_id")) == player_id), None)
+                                      if pos.get("player_id", pos.get("tracked_id", 0)) == player_id), None)
 
                 if corrected_pos:
-                    # Use unflipped coordinates for displacement calculation
-                    orig_x = pos_data["hip_world_X"]
-                    orig_y = pos_data["hip_world_Y"]
-                    corr_x = corrected_pos.get("hip_world_X", orig_x)
-                    corr_y = corrected_pos.get("hip_world_Y", orig_y)
+                    # Calculate displacement using unflipped coordinates
+                    if "x" in pos_data and "y" in pos_data:
+                        orig_x = pos_data["x"]
+                        orig_y = pos_data["y"]
+                        corr_x = corrected_pos.get("x", orig_x)
+                        corr_y = corrected_pos.get("y", orig_y)
+                    elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                        orig_x = pos_data["hip_world_X"]
+                        orig_y = pos_data["hip_world_Y"]
+                        corr_x = corrected_pos.get("hip_world_X", orig_x)
+                        corr_y = corrected_pos.get("hip_world_Y", orig_y)
+                    else:
+                        continue
+
                     displacement = np.sqrt((orig_x - corr_x)**2 + (orig_y - corr_y)**2)
 
                     if displacement > 0.01:  # Significant correction
@@ -658,26 +764,23 @@ def process_stage4_batch(args):
 
         # Subtle correction frame highlighting
         if corrections_in_frame > 0:
-            # Very subtle border - just a thin line
             cv2.rectangle(frame_display, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (200, 200, 100), 2)
-
-            # Subtle correction indicator in corner
             cv2.circle(frame_display, (frame.shape[1]-30, 30), 8, (200, 200, 100), -1)
             cv2.putText(frame_display, f"{corrections_in_frame}", (frame.shape[1]-35, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-        # Subtle trajectory visualization (already stored in flipped coords)
+        # Subtle trajectory visualization
         for player_id, trajectories in trajectory_history.items():
             color = processor.get_color(player_id)
 
-            # Draw original trajectory - very subtle gray
+            # Draw original trajectory - subtle gray
             original_traj = trajectories['original'][-50:]
             if len(original_traj) > 1:
                 for i in range(1, len(original_traj)):
                     alpha = i / len(original_traj)
-                    if alpha > 0.3:  # Only show recent trail
+                    if alpha > 0.3:
                         thickness = 1
-                        fade_color = (80, 80, 80)  # Very subtle gray
+                        fade_color = (80, 80, 80)
                         cv2.line(court_img, original_traj[i-1], original_traj[i], fade_color, thickness)
 
             # Draw corrected trajectory - subtle but visible
@@ -685,56 +788,97 @@ def process_stage4_batch(args):
             if len(corrected_traj) > 1:
                 for i in range(1, len(corrected_traj)):
                     alpha = i / len(corrected_traj)
-                    if alpha > 0.4:  # Only show recent trail
+                    if alpha > 0.4:
                         thickness = max(1, int(2 * alpha))
-                        # Subtle version of player color
                         subtle_color = tuple(int(c * 0.7) for c in color)
                         cv2.line(court_img, corrected_traj[i-1], corrected_traj[i], subtle_color, thickness)
 
-        # Process corrected player positions with flip
+        # Process corrected player positions
         for pos_data in corrected_frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
+            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
             color = processor.get_color(player_id)
 
-            if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Flip for display
-                world_x = processor.court_width_m - pos_data["hip_world_X"]
-                world_y = pos_data["hip_world_Y"]
-                hip_px, hip_py = processor.world_to_court(world_x, world_y)
+            # Handle both formats
+            if "x" in pos_data and "y" in pos_data:
+                # New ankle-only format - flip for display
+                world_x = processor.court_width_m - pos_data["x"]
+                world_y = pos_data["y"]
+                px, py = processor.world_to_court(world_x, world_y)
 
-                # Clean corrected position marker
-                cv2.circle(court_img, (hip_px, hip_py), 8, (255, 255, 255), -1)
-                cv2.circle(court_img, (hip_px, hip_py), 6, color, -1)
+                # Enhanced ankle position marker
+                cv2.circle(court_img, (px, py), 10, (255, 255, 255), -1)
+                cv2.circle(court_img, (px, py), 8, color, -1)
 
-                # Subtle label
+                # Method indicator for ankle tracking
+                method_used = pos_data.get("method", "unknown")
+                method_color = {
+                    'calibrated_3d': (0, 255, 0),
+                    'enhanced_homography': (255, 255, 0),
+                    'basic_homography': (255, 100, 0)
+                }.get(method_used, (128, 128, 128))
+
+                cv2.circle(court_img, (px - 12, py - 12), 2, method_color, -1)
+
+                # Label
                 label_text = f"P{player_id}"
-                cv2.putText(court_img, label_text, (hip_px - 15, hip_py - 15),
+                cv2.putText(court_img, label_text, (px - 15, py - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Draw correction indicators (using flipped positions)
+            elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                # Legacy format - flip for display
+                world_x = processor.court_width_m - pos_data["hip_world_X"]
+                world_y = pos_data["hip_world_Y"]
+                px, py = processor.world_to_court(world_x, world_y)
+
+                # Hip position marker
+                cv2.circle(court_img, (px, py), 8, (255, 255, 255), -1)
+                cv2.circle(court_img, (px, py), 6, color, -1)
+
+                # Label
+                label_text = f"P{player_id}"
+                cv2.putText(court_img, label_text, (px - 15, py - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw correction indicators
         for pos_data in original_frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
+            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
 
             corrected_pos = next((pos for pos in corrected_frame_players
-                                  if pos.get("player_id", pos.get("tracked_id")) == player_id), None)
+                                  if pos.get("player_id", pos.get("tracked_id", 0)) == player_id), None)
 
-            if corrected_pos and "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Use unflipped for displacement (already computed earlier)
-                # Create flipped positions for visualization
-                orig_x_flipped = processor.court_width_m - pos_data["hip_world_X"]
-                orig_y = pos_data["hip_world_Y"]
+            if corrected_pos:
+                # Get original position (flipped for visualization)
+                if "x" in pos_data and "y" in pos_data:
+                    orig_x_flipped = processor.court_width_m - pos_data["x"]
+                    orig_y = pos_data["y"]
+                    orig_x_unflipped = pos_data["x"]
+                elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
+                    orig_x_flipped = processor.court_width_m - pos_data["hip_world_X"]
+                    orig_y = pos_data["hip_world_Y"]
+                    orig_x_unflipped = pos_data["hip_world_X"]
+                else:
+                    continue
+
                 orig_px, orig_py = processor.world_to_court(orig_x_flipped, orig_y)
 
-                corr_x = corrected_pos["hip_world_X"]
-                corr_y = corrected_pos["hip_world_Y"]
+                # Get corrected position (flipped for visualization)
+                if "x" in corrected_pos and "y" in corrected_pos:
+                    corr_x = corrected_pos["x"]
+                    corr_y = corrected_pos["y"]
+                elif "hip_world_X" in corrected_pos and "hip_world_Y" in corrected_pos:
+                    corr_x = corrected_pos["hip_world_X"]
+                    corr_y = corrected_pos["hip_world_Y"]
+                else:
+                    continue
+
                 corr_x_flipped = processor.court_width_m - corr_x
                 corr_px, corr_py = processor.world_to_court(corr_x_flipped, corr_y)
 
-                # Only draw if significant correction
-                orig_x = pos_data["hip_world_X"]
-                displacement = np.sqrt((orig_x - corr_x)**2 + (orig_y - corr_y)**2)
+                # Calculate displacement using unflipped coordinates
+                displacement = np.sqrt((orig_x_unflipped - corr_x)**2 + (orig_y - corr_y)**2)
+
                 if displacement > 0.01:
-                    # Very subtle original position
+                    # Subtle original position
                     cv2.circle(court_img, (orig_px, orig_py), 4, (120, 120, 120), -1)
 
                     # Subtle correction line
@@ -743,18 +887,16 @@ def process_stage4_batch(args):
                     # Small dot at corrected position
                     cv2.circle(court_img, (corr_px, corr_py), 2, (180, 180, 150), -1)
 
-        # Compact legend
+        # Compact legend for corrections
         if corrections_in_frame > 0:
             legend_x = court_img.shape[1] - 180
             legend_y = court_img.shape[0] - 80
 
-            # Small legend background
             cv2.rectangle(court_img, (legend_x - 5, legend_y - 15),
                           (court_img.shape[1] - 5, legend_y + 35), (0, 0, 0), -1)
             cv2.rectangle(court_img, (legend_x - 5, legend_y - 15),
                           (court_img.shape[1] - 5, legend_y + 35), (60, 60, 60), 1)
 
-            # Compact legend items
             cv2.circle(court_img, (legend_x + 8, legend_y), 3, (100, 255, 100), -1)
             cv2.putText(court_img, "Current", (legend_x + 18, legend_y + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
@@ -763,7 +905,7 @@ def process_stage4_batch(args):
             cv2.putText(court_img, "Original", (legend_x + 18, legend_y + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1)
 
-        # Subtle court info panel
+        # Court info panel with correction information
         info_text = ""
         if corrections_in_frame > 0:
             info_text = f"Corrections: {corrections_in_frame}"
@@ -877,13 +1019,18 @@ def visualize_stage2(video_path: str, data_path: str, output_path: str, num_thre
     logging.info(f"✓ Enhanced Stage 2 visualization saved to {output_path}")
 
 def visualize_stage3(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 3 visualization: Enhanced 3D position tracking"""
-    logging.info("Creating Stage 3 visualization: Enhanced 3D position tracking")
+    """Stage 3 visualization: Enhanced ankle-only position tracking"""
+    logging.info("Creating Stage 3 visualization: Enhanced ankle-only position tracking")
 
     processor = VideoProcessor(video_path, num_threads)
     data = load_json_data(data_path)
     court_points = data.get("court_points", {})
-    video_info = data["video_info"]
+
+    # Get video info from either data file or processor
+    video_info = data.get("video_info", {})
+    if not video_info or "width" not in video_info:
+        video_info = processor.video_info
+
     player_positions = data["player_positions"]
 
     positions_by_frame = organize_by_frame(player_positions)
@@ -891,7 +1038,7 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
 
     # Setup video writer with side-by-side layout
     out_w = video_info["width"] + processor.court_img_w
-    out_h = max(video_info["height"], processor.court_img_h + 80)  # Extra space for info panel
+    out_h = max(video_info["height"], processor.court_img_h + 80)
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, video_info["fps"], (out_w, out_h))
@@ -922,16 +1069,15 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
                     out.write(combined_frame)
                     pbar.update(1)
 
-                # Periodic cleanup
                 if start_frame % (batch_size * 10) == 0:
                     gc.collect()
 
     out.release()
-    logging.info(f"✓ Enhanced Stage 3 visualization saved to {output_path}")
+    logging.info(f"✓ Enhanced Stage 3 ankle-only visualization saved to {output_path}")
 
 def visualize_stage4(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 4 visualization: Enhanced corrected position comparison"""
-    logging.info("Creating Stage 4 visualization: Enhanced corrected position comparison")
+    """Stage 4 visualization: Enhanced ankle-only corrected position comparison"""
+    logging.info("Creating Stage 4 visualization: Enhanced ankle-only corrected position comparison")
 
     processor = VideoProcessor(video_path, num_threads)
     corrected_data = load_json_data(data_path)
@@ -949,7 +1095,12 @@ def visualize_stage4(video_path: str, data_path: str, output_path: str, num_thre
 
     # Organize data
     court_points = corrected_data.get("court_points", {})
-    video_info = corrected_data["video_info"]
+
+    # Get video info from either data file or processor
+    video_info = corrected_data.get("video_info", {})
+    if not video_info or "width" not in video_info:
+        video_info = processor.video_info
+
     corrected_positions = corrected_data["player_positions"]
     original_positions = original_data["player_positions"]
 
@@ -993,15 +1144,14 @@ def visualize_stage4(video_path: str, data_path: str, output_path: str, num_thre
                     out.write(combined_frame)
                     pbar.update(1)
 
-                # Periodic cleanup
                 if start_frame % (batch_size * 8) == 0:
                     gc.collect()
 
     out.release()
-    logging.info(f"✓ Enhanced Stage 4 visualization saved to {output_path}")
+    logging.info(f"✓ Enhanced Stage 4 ankle-only visualization saved to {output_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Create enhanced visualizations for BPLFMV pipeline stages")
+    parser = argparse.ArgumentParser(description="Create enhanced visualizations for BPLFMV pipeline stages with ankle-only support")
     parser.add_argument("video_path", type=str, help="Path to input video")
     parser.add_argument("--stage", type=int, required=True, choices=[1, 2, 3, 4],
                         help="Stage to visualize (1=court, 2=pose, 3=positions, 4=corrected)")
@@ -1033,7 +1183,7 @@ def main():
         args.data_path = stage_data_files[args.stage]
 
     if args.output is None:
-        stage_names = {1: "court_enhanced", 2: "pose_enhanced", 3: "positions_enhanced", 4: "corrected_enhanced"}
+        stage_names = {1: "court_enhanced", 2: "pose_enhanced", 3: "ankle_enhanced", 4: "corrected_ankle_enhanced"}
         args.output = os.path.join(result_dir, f"{base_name}_{stage_names[args.stage]}_viz.mp4")
 
     # Check if data file exists
@@ -1065,7 +1215,7 @@ def main():
         total_time = end_time - start_time
         final_memory = psutil.virtual_memory().percent
 
-        logging.info(f"✓ Enhanced visualization complete!")
+        logging.info(f"✓ Enhanced ankle-only visualization complete!")
         logging.info(f"✓ Output saved to: {args.output}")
         logging.info(f"✓ Total processing time: {total_time:.2f} seconds")
         logging.info(f"✓ Memory usage change: {initial_memory}% → {final_memory}%")
