@@ -532,7 +532,8 @@ def process_stage3_batch(args):
             player_has_position = False
             for x_key, y_key, label, pos_color, radius, is_main in position_types:
                 if x_key in pos_data and y_key in pos_data:
-                    world_x = pos_data[x_key]
+                    # Flip x-coordinate for reflection about y-axis
+                    world_x = processor.court_width_m - pos_data[x_key]
                     world_y = pos_data[y_key]
                     px, py = processor.world_to_court(world_x, world_y)
 
@@ -603,47 +604,53 @@ def process_stage4_batch(args):
         corrections_in_frame = 0
         total_displacement = 0.0
 
-        # Update trajectory history and detect corrections
+        # Update trajectory history and detect corrections - use flipped coordinates
         for pos_data in corrected_frame_players:
             player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
 
             if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                hip_x = pos_data["hip_world_X"]
-                hip_y = pos_data["hip_world_Y"]
-                hip_px = processor.world_to_court(hip_x, hip_y)
+                # Flip x for reflection
+                world_x = processor.court_width_m - pos_data["hip_world_X"]
+                world_y = pos_data["hip_world_Y"]
+                hip_px, hip_py = processor.world_to_court(world_x, world_y)
 
                 # Update trajectory
                 if player_id not in trajectory_history:
                     trajectory_history[player_id] = {'corrected': [], 'original': []}
 
-                trajectory_history[player_id]['corrected'].append(hip_px)
+                trajectory_history[player_id]['corrected'].append((hip_px, hip_py))
                 if len(trajectory_history[player_id]['corrected']) > 50:  # Longer trail
                     trajectory_history[player_id]['corrected'] = trajectory_history[player_id]['corrected'][-50:]
 
+        # Process original positions with flip for trajectory
         for pos_data in original_frame_players:
             player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
 
             if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                hip_x = pos_data["hip_world_X"]
-                hip_y = pos_data["hip_world_Y"]
-                hip_px = processor.world_to_court(hip_x, hip_y)
+                # Flip x for reflection
+                world_x = processor.court_width_m - pos_data["hip_world_X"]
+                world_y = pos_data["hip_world_Y"]
+                hip_px, hip_py = processor.world_to_court(world_x, world_y)
 
                 # Update trajectory
                 if player_id not in trajectory_history:
                     trajectory_history[player_id] = {'corrected': [], 'original': []}
 
-                trajectory_history[player_id]['original'].append(hip_px)
+                trajectory_history[player_id]['original'].append((hip_px, hip_py))
                 if len(trajectory_history[player_id]['original']) > 50:
                     trajectory_history[player_id]['original'] = trajectory_history[player_id]['original'][-50:]
 
-                # Check for corrections
+                # Check for corrections using unflipped world coordinates
                 corrected_pos = next((pos for pos in corrected_frame_players
                                       if pos.get("player_id", pos.get("tracked_id")) == player_id), None)
 
                 if corrected_pos:
-                    corr_x = corrected_pos.get("hip_world_X", hip_x)
-                    corr_y = corrected_pos.get("hip_world_Y", hip_y)
-                    displacement = np.sqrt((hip_x - corr_x)**2 + (hip_y - corr_y)**2)
+                    # Use unflipped coordinates for displacement calculation
+                    orig_x = pos_data["hip_world_X"]
+                    orig_y = pos_data["hip_world_Y"]
+                    corr_x = corrected_pos.get("hip_world_X", orig_x)
+                    corr_y = corrected_pos.get("hip_world_Y", orig_y)
+                    displacement = np.sqrt((orig_x - corr_x)**2 + (orig_y - corr_y)**2)
 
                     if displacement > 0.01:  # Significant correction
                         corrections_in_frame += 1
@@ -659,7 +666,7 @@ def process_stage4_batch(args):
             cv2.putText(frame_display, f"{corrections_in_frame}", (frame.shape[1]-35, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-        # Subtle trajectory visualization
+        # Subtle trajectory visualization (already stored in flipped coords)
         for player_id, trajectories in trajectory_history.items():
             color = processor.get_color(player_id)
 
@@ -684,26 +691,27 @@ def process_stage4_batch(args):
                         subtle_color = tuple(int(c * 0.7) for c in color)
                         cv2.line(court_img, corrected_traj[i-1], corrected_traj[i], subtle_color, thickness)
 
-        # Subtle position markers
+        # Process corrected player positions with flip
         for pos_data in corrected_frame_players:
             player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
             color = processor.get_color(player_id)
 
             if "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                hip_x = pos_data["hip_world_X"]
-                hip_y = pos_data["hip_world_Y"]
-                hip_px = processor.world_to_court(hip_x, hip_y)
+                # Flip for display
+                world_x = processor.court_width_m - pos_data["hip_world_X"]
+                world_y = pos_data["hip_world_Y"]
+                hip_px, hip_py = processor.world_to_court(world_x, world_y)
 
                 # Clean corrected position marker
-                cv2.circle(court_img, hip_px, 8, (255, 255, 255), -1)
-                cv2.circle(court_img, hip_px, 6, color, -1)
+                cv2.circle(court_img, (hip_px, hip_py), 8, (255, 255, 255), -1)
+                cv2.circle(court_img, (hip_px, hip_py), 6, color, -1)
 
                 # Subtle label
                 label_text = f"P{player_id}"
-                cv2.putText(court_img, label_text, (hip_px[0] - 15, hip_px[1] - 15),
+                cv2.putText(court_img, label_text, (hip_px - 15, hip_py - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Subtle correction indicators
+        # Draw correction indicators (using flipped positions)
         for pos_data in original_frame_players:
             player_id = pos_data.get("player_id", pos_data.get("tracked_id"))
 
@@ -711,27 +719,31 @@ def process_stage4_batch(args):
                                   if pos.get("player_id", pos.get("tracked_id")) == player_id), None)
 
             if corrected_pos and "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                orig_x = pos_data["hip_world_X"]
+                # Use unflipped for displacement (already computed earlier)
+                # Create flipped positions for visualization
+                orig_x_flipped = processor.court_width_m - pos_data["hip_world_X"]
                 orig_y = pos_data["hip_world_Y"]
-                corr_x = corrected_pos.get("hip_world_X", orig_x)
-                corr_y = corrected_pos.get("hip_world_Y", orig_y)
+                orig_px, orig_py = processor.world_to_court(orig_x_flipped, orig_y)
 
+                corr_x = corrected_pos["hip_world_X"]
+                corr_y = corrected_pos["hip_world_Y"]
+                corr_x_flipped = processor.court_width_m - corr_x
+                corr_px, corr_py = processor.world_to_court(corr_x_flipped, corr_y)
+
+                # Only draw if significant correction
+                orig_x = pos_data["hip_world_X"]
                 displacement = np.sqrt((orig_x - corr_x)**2 + (orig_y - corr_y)**2)
-
                 if displacement > 0.01:
-                    orig_px = processor.world_to_court(orig_x, orig_y)
-                    corr_px = processor.world_to_court(corr_x, corr_y)
-
                     # Very subtle original position
-                    cv2.circle(court_img, orig_px, 4, (120, 120, 120), -1)
+                    cv2.circle(court_img, (orig_px, orig_py), 4, (120, 120, 120), -1)
 
-                    # Subtle correction line - thin and understated
-                    cv2.line(court_img, orig_px, corr_px, (150, 150, 120), 1)
+                    # Subtle correction line
+                    cv2.line(court_img, (orig_px, orig_py), (corr_px, corr_py), (150, 150, 120), 1)
 
                     # Small dot at corrected position
-                    cv2.circle(court_img, corr_px, 2, (180, 180, 150), -1)
+                    cv2.circle(court_img, (corr_px, corr_py), 2, (180, 180, 150), -1)
 
-        # Compact legend - only show if corrections exist
+        # Compact legend
         if corrections_in_frame > 0:
             legend_x = court_img.shape[1] - 180
             legend_y = court_img.shape[0] - 80
