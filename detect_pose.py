@@ -9,7 +9,7 @@ Implementation based on research paper methodology:
 - Ankle-knee joint validation for player filtering
 - Sequential player detection without Y-position based ID assignment
 
-Reads calibration data from detect_court.py and outputs pose.json with validated player poses.
+Reads calibration data from enhanced_court_detection.py and outputs pose.json with validated player poses.
 """
 
 import cv2
@@ -41,7 +41,7 @@ CONFIDENCE_THRESHOLD = 0.5  # minimum confidence for joint detection
 
 
 def read_calibration_csv(csv_path):
-    """Read calibration data from the new detect_court.py format."""
+    """Read calibration data from enhanced_court_detection.py format."""
     calibration_data = {
         'camera_matrix': None,
         'dist_coeffs': None,
@@ -53,17 +53,12 @@ def read_calibration_csv(csv_path):
         'calibration_method': None
     }
 
-    intrinsic_params = {}
-    distortion_params = {}
-    rotation_params = {}
-    translation_params = {}
-
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Calibration CSV not found: {csv_path}")
 
     with open(csv_path, 'r') as file:
         csv_reader = csv.reader(file)
-        in_court_points_section = False
+        current_section = None
 
         for row in csv_reader:
             if not row or row[0].startswith('#'):
@@ -75,70 +70,66 @@ def read_calibration_csv(csv_path):
             key = row[0].strip()
             value = row[1].strip() if len(row) > 1 else ''
 
-            # Parse different sections
-            if key == 'Point':  # Start of court points section
-                in_court_points_section = True
-                continue
-            elif in_court_points_section and len(row) >= 3:
-                # Court points: Point, Image_X, Image_Y, World_X, World_Y, World_Z, Error_Pixels
+            # Detect section
+            if key == 'fx':
+                current_section = 'camera_matrix'
+                calibration_data['camera_matrix'] = np.zeros((3, 3), dtype=np.float32)
+                calibration_data['camera_matrix'][2, 2] = 1.0
+                calibration_data['camera_matrix'][0, 0] = float(value)
+            elif key == 'fy' and current_section == 'camera_matrix':
+                calibration_data['camera_matrix'][1, 1] = float(value)
+            elif key == 'cx' and current_section == 'camera_matrix':
+                calibration_data['camera_matrix'][0, 2] = float(value)
+            elif key == 'cy' and current_section == 'camera_matrix':
+                calibration_data['camera_matrix'][1, 2] = float(value)
+            elif key in ['k1', 'k2', 'p1', 'p2', 'k3']:
+                if calibration_data['dist_coeffs'] is None:
+                    calibration_data['dist_coeffs'] = np.zeros(5, dtype=np.float32)
+                idx_map = {'k1': 0, 'k2': 1, 'p1': 2, 'p2': 3, 'k3': 4}
+                calibration_data['dist_coeffs'][idx_map[key]] = float(value)
+            elif key == 'rx':
+                current_section = 'pose'
+                calibration_data['rvec'] = np.zeros(3, dtype=np.float32)
+                calibration_data['rvec'][0] = float(value)
+            elif key == 'ry' and current_section == 'pose':
+                calibration_data['rvec'][1] = float(value)
+            elif key == 'rz' and current_section == 'pose':
+                calibration_data['rvec'][2] = float(value)
+            elif key == 'tx':
+                calibration_data['tvec'] = np.zeros(3, dtype=np.float32)
+                calibration_data['tvec'][0] = float(value)
+            elif key == 'ty' and current_section == 'pose':
+                calibration_data['tvec'][1] = float(value)
+            elif key == 'tz' and current_section == 'pose':
+                calibration_data['tvec'][2] = float(value)
+            elif key == 'reprojection_error_px':
+                calibration_data['reprojection_error'] = float(value)
+            elif key == 'calibration_strategy':
+                calibration_data['calibration_method'] = value
+            elif key == 'Point':
+                current_section = 'points'
+            elif current_section == 'points' and len(row) >= 2:
                 point_name = row[0].strip()
                 try:
-                    x_coord = float(row[1])
-                    y_coord = float(row[2])
-                    calibration_data['court_points'][point_name] = [x_coord, y_coord]
+                    error = float(row[1]) if len(row) > 1 else None
+                    # Since points are inlier points, we assume they're already in the correct coordinate system
+                    if point_name in calibration_data['court_points']:
+                        # Handle potential duplicate points by keeping the one with lower error if available
+                        if error is not None and calibration_data['court_points'][point_name][2] is not None:
+                            if error < calibration_data['court_points'][point_name][2]:
+                                calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
+                        else:
+                            calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
+                    else:
+                        calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
                 except (ValueError, IndexError):
                     continue
-            elif key.startswith('intrinsic_'):
-                intrinsic_params[key] = float(value)
-            elif key.startswith('distortion_'):
-                distortion_params[key] = float(value)
-            elif key.startswith('rotation_'):
-                rotation_params[key] = float(value)
-            elif key.startswith('translation_'):
-                translation_params[key] = float(value)
-            elif key == 'reprojection_error_pixels':
-                calibration_data['reprojection_error'] = float(value)
-            elif key == 'image_width':
-                if calibration_data['image_size'] is None:
-                    calibration_data['image_size'] = [int(value), 0]
-                else:
-                    calibration_data['image_size'][0] = int(value)
-            elif key == 'image_height':
-                if calibration_data['image_size'] is None:
-                    calibration_data['image_size'] = [0, int(value)]
-                else:
-                    calibration_data['image_size'][1] = int(value)
-            elif key == 'calibration_method':
-                calibration_data['calibration_method'] = value
 
-    # Reconstruct camera matrix
-    if all(param in intrinsic_params for param in ['intrinsic_fx', 'intrinsic_fy', 'intrinsic_cx', 'intrinsic_cy']):
-        calibration_data['camera_matrix'] = np.array([
-            [intrinsic_params['intrinsic_fx'], 0, intrinsic_params['intrinsic_cx']],
-            [0, intrinsic_params['intrinsic_fy'], intrinsic_params['intrinsic_cy']],
-            [0, 0, 1]
-        ], dtype=np.float32)
-
-    # Reconstruct distortion coefficients
-    dist_keys = sorted([k for k in distortion_params.keys() if k.startswith('distortion_')])
-    if dist_keys:
-        calibration_data['dist_coeffs'] = np.array([distortion_params[k] for k in dist_keys], dtype=np.float32)
-
-    # Reconstruct rotation vector
-    if all(param in rotation_params for param in ['rotation_x', 'rotation_y', 'rotation_z']):
-        calibration_data['rvec'] = np.array([
-            rotation_params['rotation_x'],
-            rotation_params['rotation_y'],
-            rotation_params['rotation_z']
-        ], dtype=np.float32)
-
-    # Reconstruct translation vector
-    if all(param in translation_params for param in ['translation_x', 'translation_y', 'translation_z']):
-        calibration_data['tvec'] = np.array([
-            translation_params['translation_x'],
-            translation_params['translation_y'],
-            translation_params['translation_z']
-        ], dtype=np.float32)
+    # Set image size based on cx, cy if available
+    if calibration_data['camera_matrix'] is not None:
+        cx = calibration_data['camera_matrix'][0, 2]
+        cy = calibration_data['camera_matrix'][1, 2]
+        calibration_data['image_size'] = [int(cx * 2), int(cy * 2)]  # Approximate from principal point
 
     print(f"Loaded calibration data:")
     print(f"  - {len(calibration_data['court_points'])} court points")
@@ -159,7 +150,7 @@ def extract_corner_points(all_court_points):
     for i in range(1, 5):
         point_name = f"P{i}"
         if point_name in all_court_points:
-            corner_points[point_name] = all_court_points[point_name]
+            corner_points[point_name] = [all_court_points[point_name][0], all_court_points[point_name][1]]
 
     if len(corner_points) == 4:
         return corner_points
@@ -167,7 +158,7 @@ def extract_corner_points(all_court_points):
     # Fallback: use first 4 points if P1-P4 not available
     print("Warning: P1-P4 not found, using first 4 points as corners")
     point_items = list(all_court_points.items())[:4]
-    return {f"P{i+1}": coords for i, (_, coords) in enumerate(point_items)}
+    return {f"P{i+1}": [coords[0], coords[1]] for i, (_, coords) in enumerate(point_items)}
 
 
 def get_3d_court_points():
@@ -570,7 +561,7 @@ class EnhancedPoseDetector:
         output_data = {
             "court_points": corner_points,
             "enlarged_court_points": enlarged_court,
-            "all_court_points": all_court_points,
+            "all_court_points": {k: [v[0], v[1]] for k, v in all_court_points.items()},
             "video_info": video_info,
             "rally_frames": list(rally_frames),
             "pose_data": all_pose_data,
@@ -598,12 +589,13 @@ class EnhancedPoseDetector:
                 "pose_estimator": "Enhanced Pose Estimation with Calibrated Camera Parameters",
                 "court_dimensions": f"{COURT_LENGTH}m x {COURT_WIDTH}m",
                 "implementation_features": [
-                    "Calibrated camera parameters from detect_court.py",
+                    "Calibrated camera parameters from enhanced_court_detection.py",
                     "Perspective-n-Point (PnP) camera pose from calibration",
                     "Intelligent boundary extension based on calibrated elevation angle",
                     "Ankle-knee joint validation for player filtering",
                     "Sequential pose detection without automatic player ID assignment",
-                    "Full integration with BWF standard court detection system"
+                    "Full integration with BWF standard court detection system",
+                    "Automatic coordinate system correction"
                 ]
             }
         }
@@ -632,11 +624,12 @@ def main(video_path):
     print("="*80)
     print("Implementation features:")
     print("• YOLOv11x-pose for human keypoint detection")
-    print("• Calibrated camera parameters from detect_court.py")
+    print("• Calibrated camera parameters from enhanced_court_detection.py")
     print("• Intelligent boundary extension based on calibrated elevation angle")
     print("• Ankle-knee joint validation for player filtering")
     print("• Sequential pose detection (no automatic player ID assignment)")
     print("• Full integration with BWF standard court detection system")
+    print("• Automatic coordinate system correction")
     print("="*80)
     print(f"Court dimensions: {COURT_LENGTH}m x {COURT_WIDTH}m")
     print(f"Maximum jump height: {MAX_JUMP_HEIGHT}m")
@@ -648,13 +641,13 @@ def main(video_path):
     result_dir = os.path.join("results", base_name)
 
     # Look for calibration CSV file
-    calibration_csv_path = os.path.join(result_dir, f"{base_name}_calibration_complete.csv")
+    calibration_csv_path = os.path.join(result_dir, f"{base_name}_fixed_calibration.csv")
     if not os.path.exists(calibration_csv_path):
         # Fallback to court.csv for backward compatibility
         calibration_csv_path = os.path.join(result_dir, "court.csv")
         if not os.path.exists(calibration_csv_path):
             logging.error(f"Calibration data not found in: {result_dir}")
-            logging.error("Please run court detection first: python3 detect_court.py <video_path>")
+            logging.error("Please run court detection first: python3 enhanced_court_detection.py <video_path>")
             return None
 
     output_json_path = os.path.join(result_dir, "pose.json")
@@ -687,7 +680,7 @@ if __name__ == "__main__":
         print("  python3 enhanced_pose_estimation.py samples/badminton_match.mp4")
         print("\nRequirements:")
         print("  - Court detection and calibration must be run first")
-        print("  - detect_court.py generates calibration data")
+        print("  - enhanced_court_detection.py generates calibration data")
         print("  - YOLOv11x-pose model (will be downloaded if not found)")
         print("  - OpenCV, PyTorch, Ultralytics")
         sys.exit(1)

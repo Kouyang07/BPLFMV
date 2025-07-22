@@ -52,7 +52,7 @@ class EnhancedAnkleTracker:
         self.video_name = self.video_path.stem
         self.results_dir = Path("results") / self.video_name
         self.pose_file = self.results_dir / "pose.json"
-        self.calibration_file = self.results_dir / f"{self.video_name}_calibration_complete.csv"
+        self.calibration_file = self.results_dir / f"{self.video_name}_fixed_calibration.csv"
         self.output_file = self.results_dir / "positions.json"
         self.debug = debug
 
@@ -82,73 +82,91 @@ class EnhancedAnkleTracker:
             print("⚠️  No calibration data found - using basic homography")
             return
 
-        intrinsic_params = {}
-        distortion_params = {}
-        translation_params = {}
+        calibration_params = {}
 
-        with open(self.calibration_file, 'r') as file:
-            csv_reader = csv.reader(file)
-            in_court_points_section = False
+        try:
+            with open(self.calibration_file, 'r') as file:
+                csv_reader = csv.reader(file)
+                current_section = None
 
-            for row in csv_reader:
-                if not row or row[0].startswith('#'):
-                    continue
-
-                if len(row) < 2:
-                    continue
-
-                key = row[0].strip()
-                value = row[1].strip() if len(row) > 1 else ''
-
-                if key == 'Point':
-                    in_court_points_section = True
-                    continue
-                elif in_court_points_section and len(row) >= 3:
-                    point_name = row[0].strip()
-                    try:
-                        x_coord = float(row[1])
-                        y_coord = float(row[2])
-                        if not hasattr(self, 'court_points') or self.court_points is None:
-                            self.court_points = {}
-                        self.court_points[point_name] = [x_coord, y_coord]
-                    except (ValueError, IndexError):
+                for row in csv_reader:
+                    if not row or row[0].startswith('#') or len(row) < 2:
                         continue
-                elif key.startswith('intrinsic_'):
-                    intrinsic_params[key] = float(value)
-                elif key.startswith('distortion_'):
-                    distortion_params[key] = float(value)
-                elif key.startswith('translation_'):
-                    translation_params[key] = float(value)
-                elif key == 'reprojection_error_pixels':
-                    self.reprojection_error = float(value)
 
-        # Reconstruct camera parameters for enhancement
-        if all(param in intrinsic_params for param in ['intrinsic_fx', 'intrinsic_fy', 'intrinsic_cx', 'intrinsic_cy']):
-            self.camera_matrix = np.array([
-                [intrinsic_params['intrinsic_fx'], 0, intrinsic_params['intrinsic_cx']],
-                [0, intrinsic_params['intrinsic_fy'], intrinsic_params['intrinsic_cy']],
-                [0, 0, 1]
-            ], dtype=np.float32)
+                    key = row[0].strip()
+                    value = row[1].strip()
 
-        dist_keys = sorted([k for k in distortion_params.keys() if k.startswith('distortion_')])
-        if dist_keys:
-            self.dist_coeffs = np.array([distortion_params[k] for k in dist_keys], dtype=np.float32)
+                    # Detect section
+                    if key == 'fx':
+                        current_section = 'camera_matrix'
+                        calibration_params['fx'] = float(value)
+                    elif key == 'fy' and current_section == 'camera_matrix':
+                        calibration_params['fy'] = float(value)
+                    elif key == 'cx' and current_section == 'camera_matrix':
+                        calibration_params['cx'] = float(value)
+                    elif key == 'cy' and current_section == 'camera_matrix':
+                        calibration_params['cy'] = float(value)
+                    elif key in ['k1', 'k2', 'p1', 'p2', 'k3']:
+                        calibration_params[key] = float(value)
+                    elif key == 'camera_height_m':
+                        calibration_params['camera_height_m'] = float(value)
+                    elif key == 'reprojection_error_px':
+                        calibration_params['reprojection_error_px'] = float(value)
 
-        if 'translation_z' in translation_params:
-            self.camera_height = abs(float(translation_params['translation_z']))
+            # Reconstruct camera matrix
+            if all(param in calibration_params for param in ['fx', 'fy', 'cx', 'cy']):
+                self.camera_matrix = np.array([
+                    [calibration_params['fx'], 0, calibration_params['cx']],
+                    [0, calibration_params['fy'], calibration_params['cy']],
+                    [0, 0, 1]
+                ], dtype=np.float32)
 
-        # Check if calibration can enhance homography
-        self.calibration_available = (
-                self.camera_matrix is not None and
-                self.camera_height is not None and
-                (self.reprojection_error is None or self.reprojection_error < 30.0)
-        )
+                if self.debug:
+                    print(f"✓ Camera matrix reconstructed:")
+                    print(f"  fx: {calibration_params['fx']:.1f}")
+                    print(f"  fy: {calibration_params['fy']:.1f}")
+                    print(f"  cx: {calibration_params['cx']:.1f}")
+                    print(f"  cy: {calibration_params['cy']:.1f}")
 
-        if self.calibration_available:
-            print(f"✓ Calibration available for homography enhancement (error: {self.reprojection_error:.1f}px)")
-            self._calculate_enhancement_parameters()
-        else:
-            print(f"⚠️  Calibration quality insufficient for enhancement")
+            # Reconstruct distortion coefficients
+            dist_coeffs = []
+            for param in ['k1', 'k2', 'p1', 'p2', 'k3']:
+                if param in calibration_params:
+                    dist_coeffs.append(calibration_params[param])
+            if dist_coeffs:
+                self.dist_coeffs = np.array(dist_coeffs, dtype=np.float32)
+                if self.debug:
+                    print(f"✓ Distortion coefficients: {self.dist_coeffs}")
+
+            # Get camera height
+            if 'camera_height_m' in calibration_params:
+                self.camera_height = calibration_params['camera_height_m']
+                if self.debug:
+                    print(f"✓ Camera height: {self.camera_height:.1f}m")
+
+            # Get reprojection error for quality assessment
+            if 'reprojection_error_px' in calibration_params:
+                self.reprojection_error = calibration_params['reprojection_error_px']
+                if self.debug:
+                    print(f"✓ Reprojection error: {self.reprojection_error:.2f}px")
+
+            # Check if calibration can enhance homography
+            self.calibration_available = (
+                    self.camera_matrix is not None and
+                    self.camera_height is not None and
+                    (self.reprojection_error is None or self.reprojection_error < 30.0)
+            )
+
+            if self.calibration_available:
+                print(f"✓ Calibration available for homography enhancement (error: {self.reprojection_error:.1f}px)")
+                self._calculate_enhancement_parameters()
+            else:
+                print(f"⚠️  Calibration quality insufficient for enhancement")
+
+        except Exception as e:
+            print(f"⚠️  Error loading calibration data: {e}")
+            print("   Falling back to basic homography")
+            self.calibration_available = False
 
     def _calculate_enhancement_parameters(self) -> None:
         """Calculate parameters to enhance homography using calibration data."""
@@ -156,7 +174,6 @@ class EnhancedAnkleTracker:
             return
 
         # Estimate pixel-to-meter ratio at court level using camera height
-        # This helps scale the ankle offset appropriately
         if self.camera_height and self.camera_matrix is not None:
             # Approximate focal length in pixels
             focal_length = (self.camera_matrix[0, 0] + self.camera_matrix[1, 1]) / 2
@@ -168,9 +185,10 @@ class EnhancedAnkleTracker:
             self.enhanced_ankle_offset = self.BASE_ANKLE_OFFSET * self.pixel_to_meter_ratio
 
             if self.debug:
-                print(f"Camera height: {self.camera_height:.2f}m")
-                print(f"Pixel-to-meter ratio: {self.pixel_to_meter_ratio:.1f} px/m")
-                print(f"Enhanced ankle offset: {self.enhanced_ankle_offset:.1f} pixels")
+                print(f"Enhancement parameters:")
+                print(f"  Camera height: {self.camera_height:.2f}m")
+                print(f"  Pixel-to-meter ratio: {self.pixel_to_meter_ratio:.1f} px/m")
+                print(f"  Enhanced ankle offset: {self.enhanced_ankle_offset:.1f} pixels")
 
     def load_pose_data(self) -> None:
         """Load pose detection data."""
@@ -182,17 +200,20 @@ class EnhancedAnkleTracker:
 
         self.pose_data = data
         self.video_info = data.get('video_info', {})
-
+        self.court_points = data.get('court_points', {})
         if not self.court_points:
-            self.court_points = data.get('court_points', {})
+            raise ValueError("No court points found in pose data")
 
-        print(f"Loaded pose data with {len(data.get('pose_data', []))} detections")
+        print(f"✓ Loaded pose data with {len(data.get('pose_data', []))} detections")
+        print(f"✓ Loaded {len(self.court_points)} court points")
 
     def calculate_homography(self) -> None:
         """Calculate homography matrix from court corners."""
         required_corners = ['P1', 'P2', 'P3', 'P4']
-        if not all(corner in self.court_points for corner in required_corners):
-            raise ValueError(f"Missing required court corners: {required_corners}")
+        missing_corners = [corner for corner in required_corners if corner not in self.court_points]
+
+        if missing_corners:
+            raise ValueError(f"Missing required court corners: {missing_corners}")
 
         image_points = np.array([
             self.court_points['P1'],  # Top-left
@@ -216,6 +237,11 @@ class EnhancedAnkleTracker:
             raise ValueError("Failed to calculate homography")
 
         print("✓ Homography matrix calculated")
+        if self.debug:
+            print("Court corners (pixels):")
+            for i, corner in enumerate(required_corners):
+                px, py = self.court_points[corner]
+                print(f"  {corner}: ({px:.1f}, {py:.1f})")
 
     def undistort_point(self, point: Tuple[float, float]) -> Tuple[float, float]:
         """Undistort a pixel point if calibration available."""
@@ -228,7 +254,9 @@ class EnhancedAnkleTracker:
                 point_array, self.camera_matrix, self.dist_coeffs, P=self.camera_matrix
             )
             return float(undistorted[0][0][0]), float(undistorted[0][0][1])
-        except:
+        except Exception as e:
+            if self.debug:
+                print(f"Undistortion failed: {e}")
             return point
 
     def calculate_ankle_ground_position(self, ankle_pixel: Tuple[float, float], ankle_side: str) -> Tuple[float, float]:
@@ -237,6 +265,10 @@ class EnhancedAnkleTracker:
             # Step 1: Undistort the pixel point if calibration available
             if self.calibration_available:
                 undistorted_pixel = self.undistort_point(ankle_pixel)
+                if self.debug and ankle_side == 'left':  # Only debug left ankle to avoid spam
+                    px_diff = undistorted_pixel[0] - ankle_pixel[0]
+                    py_diff = undistorted_pixel[1] - ankle_pixel[1]
+                    print(f"Undistortion shift: ({px_diff:.1f}, {py_diff:.1f}) pixels")
             else:
                 undistorted_pixel = ankle_pixel
 
@@ -244,9 +276,13 @@ class EnhancedAnkleTracker:
             if self.enhanced_ankle_offset is not None:
                 # Use calibration-enhanced offset
                 offset_y = self.enhanced_ankle_offset
+                if self.debug and ankle_side == 'left':
+                    print(f"Using enhanced ankle offset: {offset_y:.1f} pixels")
             else:
                 # Use basic fixed offset
                 offset_y = 12.0  # pixels
+                if self.debug and ankle_side == 'left':
+                    print(f"Using basic ankle offset: {offset_y:.1f} pixels")
 
             corrected_pixel = (undistorted_pixel[0], undistorted_pixel[1] + offset_y)
 
@@ -267,9 +303,12 @@ class EnhancedAnkleTracker:
             if self.debug:
                 print(f"Position calculation failed for {ankle_side} ankle: {e}")
             # Simple fallback
-            point = np.array([[ankle_pixel]], dtype=np.float32)
-            world_point = cv2.perspectiveTransform(point, self.homography_matrix)
-            return float(world_point[0][0][0]), float(world_point[0][0][1])
+            try:
+                point = np.array([[ankle_pixel]], dtype=np.float32)
+                world_point = cv2.perspectiveTransform(point, self.homography_matrix)
+                return float(world_point[0][0][0]), float(world_point[0][0][1])
+            except:
+                return 0.0, 0.0
 
     def extract_joint_position(self, joints: List[Dict], joint_index: int) -> Optional[Tuple[float, float]]:
         """Extract joint position if confidence is sufficient."""
@@ -478,13 +517,13 @@ class EnhancedAnkleTracker:
         output_data = {
             'video_info': {
                 'video_name': self.video_name,
-                'total_frames': self.video_info.get('total_frames', 0),
+                'total_frames': self.video_info.get('frame_count', 0),
                 'fps': self.video_info.get('fps', 0)
             },
             'court_info': {
                 'width_meters': self.COURT_WIDTH,
                 'length_meters': self.COURT_LENGTH,
-                'coordinate_system': 'Origin at top-left corner, X=width, Y=length'
+                'coordinate_system': 'Origin at top-left corner (P1), X=width, Y=length'
             },
             'tracking_summary': {
                 'frames_with_ankle_data': total_frames_with_data,
@@ -500,7 +539,8 @@ class EnhancedAnkleTracker:
             'enhancement_info': {
                 'camera_height_meters': self.camera_height if self.calibration_available else None,
                 'pixel_to_meter_ratio': self.pixel_to_meter_ratio if self.calibration_available else None,
-                'enhanced_ankle_offset_pixels': self.enhanced_ankle_offset if self.calibration_available else None
+                'enhanced_ankle_offset_pixels': self.enhanced_ankle_offset if self.calibration_available else None,
+                'reprojection_error_px': self.reprojection_error if self.calibration_available else None
             },
             'frame_data': frame_data_dict
         }
@@ -509,7 +549,7 @@ class EnhancedAnkleTracker:
         with open(self.output_file, 'w') as f:
             json.dump(output_data, f, indent=2)
 
-        print(f"Results saved to: {self.output_file}")
+        print(f"✓ Results saved to: {self.output_file}")
         print(f"Frames with data: {total_frames_with_data}")
         print(f"Player 0: {player_0_detections} ankle detections")
         print(f"Player 1: {player_1_detections} ankle detections")
@@ -517,7 +557,7 @@ class EnhancedAnkleTracker:
 
     def run(self) -> None:
         """Run the enhanced ankle tracking pipeline."""
-        print(f"Starting enhanced individual ankle tracking for: {self.video_name}")
+        print(f"🚀 Starting enhanced individual ankle tracking for: {self.video_name}")
 
         try:
             self.load_calibration_data()
@@ -526,17 +566,23 @@ class EnhancedAnkleTracker:
             self.process_all_frames()
             self.validate_results()
             self.save_results()
-            print("✓ Enhanced ankle tracking completed successfully!")
+            print("✅ Enhanced ankle tracking completed successfully!")
 
         except Exception as e:
-            print(f"Error during processing: {e}")
+            print(f"❌ Error during processing: {e}")
             raise
 
 
 def main():
     """Main function."""
     if len(sys.argv) < 2:
-        print("Usage: python ankle_tracker.py <video_file_path> [--debug]")
+        print("Usage: python calculate_location.py <video_file_path> [--debug]")
+        print("\nExample:")
+        print("  python calculate_location.py samples/badminton_match.mp4")
+        print("\nRequirements:")
+        print("  - Court detection must be run first (enhanced_court_detection.py)")
+        print("  - Pose estimation must be run (enhanced_pose_estimation.py)")
+        print("  - OpenCV, NumPy")
         sys.exit(1)
 
     video_path = sys.argv[1]
