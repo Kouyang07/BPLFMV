@@ -476,167 +476,120 @@ def process_stage2_batch(args):
     return processed_frames
 
 def process_stage3_batch(args):
-    """Process batch for stage 3 with individual ankle visualization"""
-    (batch_frames, positions_by_frame, image_points, court_template,
+    """Process batch for stage 3 with enhanced ankle tracking visualization"""
+    (batch_frames, frame_data_by_frame, image_points, court_template,
      processor, out_h, out_w) = args
     processed_frames = []
+
+    def world_to_court_fixed(x: float, y: float) -> Tuple[int, int]:
+        """Convert world coordinates to court image coordinates (fixed mirroring)"""
+        # Fix mirrored coordinate system by flipping X coordinate
+        flipped_x = processor.court_width_m - x
+        px = int((flipped_x + processor.margin_m) * processor.court_scale)
+        py = int((y + processor.margin_m) * processor.court_scale)
+        return (px, py)
 
     for frame_idx, frame in batch_frames:
         frame_display = frame.copy()
         court_img = court_template.copy()
 
-        # Enhanced calibration points
-        for i, point in enumerate(image_points):
-            cv2.circle(frame_display, (int(point[0]), int(point[1])), 10, (0, 255, 255), -1)
-            cv2.circle(frame_display, (int(point[0]), int(point[1])), 12, (255, 255, 255), 2)
-            cv2.putText(frame_display, f"P{i+1}", (int(point[0]) + 15, int(point[1]) + 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        # Enhanced calibration points (court corners) - only if we have them
+        if len(image_points) >= 4:
+            for i, point in enumerate(image_points):
+                cv2.circle(frame_display, (int(point[0]), int(point[1])), 6, (0, 255, 255), -1)
+                cv2.circle(frame_display, (int(point[0]), int(point[1])), 8, (255, 255, 255), 2)
+                cv2.putText(frame_display, f"P{i+1}", (int(point[0]) + 10, int(point[1]) + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-        # Enhanced frame info
-        cv2.rectangle(frame_display, (0, 0), (450, 60), (0, 0, 0), -1)
-        cv2.rectangle(frame_display, (0, 0), (450, 60), (100, 150, 255), 2)
+        # Enhanced frame info header
+        cv2.rectangle(frame_display, (0, 0), (480, 60), (0, 0, 0), -1)
+        cv2.rectangle(frame_display, (0, 0), (480, 60), (100, 150, 255), 2)
         cv2.putText(frame_display, f"ANKLE TRACKING - Frame: {frame_idx}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-        # Process positions with individual ankle visualization
-        frame_players = positions_by_frame.get(frame_idx, [])
-        active_players = 0
+        # Process ankle positions from new format
+        frame_players = frame_data_by_frame.get(str(frame_idx), {})
+        active_players = len(frame_players)
         total_ankles = 0
 
-        for pos_data in frame_players:
-            player_id = pos_data.get("player_id", pos_data.get("tracked_id", 0))
+        for player_key, player_data in frame_players.items():
+            # Extract player ID from key (e.g., "player_0" -> 0)
+            player_id = int(player_key.split('_')[1]) if '_' in player_key else 0
             color = processor.get_color(player_id)
 
-            # Determine data format and extract individual ankle positions
-            ankle_count = pos_data.get("ankle_count", 0)
-            method_used = pos_data.get("method", "unknown")
+            ankles = player_data.get('ankles', [])
+            center_pos = player_data.get('center_position', {})
 
-            # Individual ankle positions to draw
-            ankle_positions = []
-            main_position = None
+            # Draw individual ankle positions
+            left_ankle_pos = None
+            right_ankle_pos = None
 
-            # Check for new ankle-only format
-            if "x" in pos_data and "y" in pos_data:
-                # This is the averaged position - we need to find individual ankles
-                # For now, show the averaged position prominently
-                world_x = processor.court_width_m - pos_data["x"]
-                world_y = pos_data["y"]
-                main_position = (world_x, world_y)
+            for ankle_data in ankles:
+                ankle_side = ankle_data['ankle_side']
+                world_x = ankle_data['world_x']
+                world_y = ankle_data['world_y']
+                confidence = ankle_data['joint_confidence']
+                method = ankle_data.get('method', 'homography')
 
-                px, py = processor.world_to_court(world_x, world_y)
+                # Skip if coordinates are 0,0 (invalid detection)
+                if world_x == 0.0 and world_y == 0.0:
+                    continue
 
-                # Draw main averaged ankle position (larger)
-                cv2.circle(court_img, (px, py), 12, (255, 255, 255), -1)  # White border
-                cv2.circle(court_img, (px, py), 10, color, -1)             # Player color
-                cv2.circle(court_img, (px, py), 15, color, 2)              # Outer ring
+                # Use fixed coordinate transformation
+                px, py = world_to_court_fixed(world_x, world_y)
+                total_ankles += 1
 
-                # Method indicator
-                method_color = {
-                    'calibrated_3d': (0, 255, 0),
-                    'enhanced_homography': (255, 255, 0),
-                    'basic_homography': (255, 100, 0)
-                }.get(method_used, (128, 128, 128))
+                # Correct coordinate system - from player's perspective
+                if ankle_side == 'right':  # Player's right ankle
+                    right_ankle_pos = (px, py)
+                    ankle_color = (255, 200, 0)   # Yellow for right ankle
+                    marker = "R"
+                else:  # ankle_side == 'left' - Player's left ankle
+                    left_ankle_pos = (px, py)
+                    ankle_color = (0, 220, 255)  # Cyan for left ankle
+                    marker = "L"
 
-                cv2.circle(court_img, (px - 18, py - 18), 4, method_color, -1)
+                # Draw ankle position with confidence-based sizing
+                radius = max(5, int(7 * confidence))
+                cv2.circle(court_img, (px, py), radius + 2, (255, 255, 255), -1)
+                cv2.circle(court_img, (px, py), radius, ankle_color, -1)
 
-                # Enhanced label with ankle count and method
-                label_text = f"P{player_id} ({ankle_count}A)"
-                method_text = method_used.split('_')[0].upper()  # "CALIBRATED", "ENHANCED", "BASIC"
+                # Enhanced method indicator - subtle green ring
+                if method == 'enhanced_homography':
+                    cv2.circle(court_img, (px, py), radius + 4, (100, 255, 100), 1)
 
-                # Main label background
-                text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(court_img, (px - 35, py - 45), (px + text_size[0] + 10, py - 20), (0, 0, 0), -1)
-                cv2.rectangle(court_img, (px - 35, py - 45), (px + text_size[0] + 10, py - 20), color, 2)
-                cv2.putText(court_img, label_text, (px - 30, py - 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # Clean ankle label
+                label_text = f"P{player_id}{marker}"
+                cv2.putText(court_img, label_text, (px + 8, py - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, ankle_color, 1)
 
-                # Method label (smaller, below)
-                method_size = cv2.getTextSize(method_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-                cv2.rectangle(court_img, (px - 25, py - 18), (px + method_size[0] + 5, py - 5), (0, 0, 0), -1)
-                cv2.putText(court_img, method_text, (px - 20, py - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, method_color, 1)
+            # Connect left and right ankles with player color line
+            if left_ankle_pos and right_ankle_pos:
+                cv2.line(court_img, left_ankle_pos, right_ankle_pos, color, 2)
 
-                active_players += 1
-                total_ankles += ankle_count
+            # Draw player center position (only if not 0,0)
+            if ('x' in center_pos and 'y' in center_pos and
+                    not (center_pos['x'] == 0.0 and center_pos['y'] == 0.0)):
+                center_x = center_pos['x']
+                center_y = center_pos['y']
+                center_px, center_py = world_to_court_fixed(center_x, center_y)
 
-            # Legacy format support (hip-based) - show individual ankle positions
-            elif "hip_world_X" in pos_data and "hip_world_Y" in pos_data:
-                # Hip position (main marker)
-                hip_world_x = processor.court_width_m - pos_data["hip_world_X"]
-                hip_world_y = pos_data["hip_world_Y"]
-                main_position = (hip_world_x, hip_world_y)
+                # Clean center marker
+                cv2.circle(court_img, (center_px, center_py), 6, color, 2)
+                cv2.circle(court_img, (center_px, center_py), 2, (255, 255, 255), -1)
 
-                hip_px, hip_py = processor.world_to_court(hip_world_x, hip_world_y)
+                # Player ID label
+                cv2.putText(court_img, f"P{player_id}", (center_px + 10, center_py + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # Hip position marker (smaller than ankle-only)
-                cv2.circle(court_img, (hip_px, hip_py), 8, (255, 255, 255), -1)
-                cv2.circle(court_img, (hip_px, hip_py), 6, color, -1)
+        # Enhanced court info panel
+        method_info = "Enhanced" if frame_players and any(
+            any(ankle.get('method') == 'enhanced_homography' for ankle in player_data.get('ankles', []))
+            for player_data in frame_players.values()
+        ) else "Basic"
 
-                # Individual ankle positions (prominent)
-                individual_ankles = []
-
-                if "left_ankle_world_X" in pos_data and "left_ankle_world_Y" in pos_data:
-                    la_x = processor.court_width_m - pos_data["left_ankle_world_X"]
-                    la_y = pos_data["left_ankle_world_Y"]
-                    la_px, la_py = processor.world_to_court(la_x, la_y)
-
-                    # Left ankle marker (cyan)
-                    cv2.circle(court_img, (la_px, la_py), 10, (255, 255, 255), -1)  # White border
-                    cv2.circle(court_img, (la_px, la_py), 8, (0, 255, 255), -1)     # Cyan
-                    cv2.circle(court_img, (la_px, la_py), 12, (0, 255, 255), 2)     # Cyan ring
-
-                    # Left ankle label
-                    cv2.putText(court_img, f"P{player_id}-LA", (la_px - 25, la_py - 15),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-                    individual_ankles.append((la_px, la_py, "LA"))
-                    ankle_positions.append((la_px, la_py))
-                    total_ankles += 1
-
-                if "right_ankle_world_X" in pos_data and "right_ankle_world_Y" in pos_data:
-                    ra_x = processor.court_width_m - pos_data["right_ankle_world_X"]
-                    ra_y = pos_data["right_ankle_world_Y"]
-                    ra_px, ra_py = processor.world_to_court(ra_x, ra_y)
-
-                    # Right ankle marker (yellow)
-                    cv2.circle(court_img, (ra_px, ra_py), 10, (255, 255, 255), -1)  # White border
-                    cv2.circle(court_img, (ra_px, ra_py), 8, (0, 255, 255), -1)     # Yellow
-                    cv2.circle(court_img, (ra_px, ra_py), 12, (0, 255, 255), 2)     # Yellow ring
-
-                    # Right ankle label
-                    cv2.putText(court_img, f"P{player_id}-RA", (ra_px - 25, ra_py - 15),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-                    individual_ankles.append((ra_px, ra_py, "RA"))
-                    ankle_positions.append((ra_px, ra_py))
-                    total_ankles += 1
-
-                # Connect hip to individual ankles with thin lines
-                for ankle_pos in ankle_positions:
-                    cv2.line(court_img, (hip_px, hip_py), ankle_pos, color, 1)
-
-                # Hip label (smaller)
-                cv2.putText(court_img, f"P{player_id}-Hip", (hip_px - 25, hip_py + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-                active_players += 1
-
-        # Enhanced court info panel with ankle details
-        method_info = ""
-        ankle_info = ""
-
-        if frame_players:
-            methods = [pos.get("method", "unknown") for pos in frame_players]
-            unique_methods = list(set(methods))
-            if len(unique_methods) == 1:
-                method_info = f"Method: {unique_methods[0]}"
-            else:
-                method_info = f"Methods: {len(unique_methods)} types"
-
-            ankle_info = f"Total Ankles: {total_ankles}"
-
-        combined_info = f"{method_info} | {ankle_info}" if method_info and ankle_info else (method_info or ankle_info)
-        court_img = processor.add_court_info_panel(court_img, frame_idx, active_players, combined_info)
+        info_text = f"Method: {method_info} | Ankles: {total_ankles}"
+        court_img = processor.add_court_info_panel(court_img, frame_idx, active_players, info_text)
 
         # Update frame info with ankle count
         cv2.putText(frame_display, f"Players: {active_players} | Ankles: {total_ankles}", (10, 50),
@@ -1019,22 +972,88 @@ def visualize_stage2(video_path: str, data_path: str, output_path: str, num_thre
     logging.info(f"✓ Enhanced Stage 2 visualization saved to {output_path}")
 
 def visualize_stage3(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 3 visualization: Enhanced ankle-only position tracking"""
-    logging.info("Creating Stage 3 visualization: Enhanced ankle-only position tracking")
+    """Stage 3 visualization: Enhanced ankle position tracking"""
+    logging.info("Creating Stage 3 visualization: Enhanced ankle position tracking")
 
     processor = VideoProcessor(video_path, num_threads)
     data = load_json_data(data_path)
-    court_points = data.get("court_points", {})
 
-    # Get video info from either data file or processor
-    video_info = data.get("video_info", {})
-    if not video_info or "width" not in video_info:
-        video_info = processor.video_info
+    # Handle the new ankle tracking format
+    if 'frame_data' in data:
+        frame_data_dict = data['frame_data']
+        video_info = data['video_info']
+        tracking_summary = data.get('tracking_summary', {})
 
-    player_positions = data["player_positions"]
+        # Log tracking statistics
+        logging.info(f"Loaded ankle tracking data:")
+        logging.info(f"  Frames with data: {tracking_summary.get('frames_with_ankle_data', 0)}")
+        logging.info(f"  Total ankle detections: {tracking_summary.get('total_ankle_detections', 0)}")
+        logging.info(f"  Method: {tracking_summary.get('primary_method', 'unknown')}")
 
-    positions_by_frame = organize_by_frame(player_positions)
-    image_points = extract_corner_points(court_points)
+        # Try to load court points from calibration file
+        court_points = {}
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        result_dir = os.path.join("results", base_name)
+        calibration_file = os.path.join(result_dir, f"{base_name}_calibration_complete.csv")
+
+        if os.path.exists(calibration_file):
+            logging.info(f"Loading court points from calibration file...")
+            try:
+                import csv
+                with open(calibration_file, 'r') as file:
+                    csv_reader = csv.reader(file)
+                    in_court_points_section = False
+
+                    for row in csv_reader:
+                        if not row or row[0].startswith('#'):
+                            continue
+
+                        key = row[0].strip()
+
+                        if key == 'Point':
+                            in_court_points_section = True
+                            continue
+                        elif in_court_points_section and len(row) >= 3:
+                            point_name = row[0].strip()
+                            try:
+                                x_coord = float(row[1])
+                                y_coord = float(row[2])
+                                court_points[point_name] = [x_coord, y_coord]
+                            except (ValueError, IndexError):
+                                continue
+                logging.info(f"  Loaded {len(court_points)} court points")
+            except Exception as e:
+                logging.warning(f"Could not load court points from calibration: {e}")
+
+        # Create minimal court points if none found (just for visualization)
+        if not court_points:
+            logging.info("No court points found - visualization will show ankle tracking only")
+            court_points = {}
+
+    else:
+        # Legacy format fallback
+        logging.warning("Legacy data format detected - limited compatibility")
+        court_points = data.get("court_points", {})
+        video_info = data["video_info"]
+        frame_data_dict = {}
+
+        # Convert if possible
+        if "player_positions" in data:
+            for pos_data in data["player_positions"]:
+                frame_idx = str(pos_data["frame_index"])
+                if frame_idx not in frame_data_dict:
+                    frame_data_dict[frame_idx] = {}
+
+    # Extract corner points for display (only if we have 4+ points)
+    image_points = []
+    if len(court_points) >= 4:
+        image_points = extract_corner_points(court_points)
+
+    # Use actual video info from the file or get fresh info
+    if not video_info.get("width") or not video_info.get("height"):
+        logging.info("Getting video information...")
+        processor_video_info = processor._get_video_info()
+        video_info.update(processor_video_info)
 
     # Setup video writer with side-by-side layout
     out_w = video_info["width"] + processor.court_img_w
@@ -1043,7 +1062,15 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, video_info["fps"], (out_w, out_h))
 
-    frame_count = video_info["frame_count"]
+    # Use actual frame count or estimate
+    frame_count = video_info.get("frame_count", 0)
+    if frame_count == 0:
+        # Get actual frame count from video
+        cap = cv2.VideoCapture(video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        logging.info(f"Detected {frame_count} frames in video")
+
     batch_size = 8
 
     with ThreadPoolExecutor(max_workers=min(processor.num_threads, 4)) as executor:
@@ -1054,7 +1081,7 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
             batch_frames = processor.get_frame_batch(start_frame, end_frame - start_frame)
 
             if batch_frames:
-                args = (batch_frames, positions_by_frame, image_points,
+                args = (batch_frames, frame_data_dict, image_points,
                         processor.court_template.copy(), processor, out_h, out_w)
                 future = executor.submit(process_stage3_batch, args)
                 futures.append((start_frame, future))
@@ -1069,11 +1096,30 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
                     out.write(combined_frame)
                     pbar.update(1)
 
+                # Periodic cleanup
                 if start_frame % (batch_size * 10) == 0:
                     gc.collect()
 
     out.release()
-    logging.info(f"✓ Enhanced Stage 3 ankle-only visualization saved to {output_path}")
+
+    # Print comprehensive summary
+    total_frames_with_data = len([f for f in frame_data_dict.values() if f])
+    total_ankle_detections = sum(
+        len(player_data['ankles'])
+        for frame_data in frame_data_dict.values()
+        for player_data in frame_data.values()
+    )
+
+    if total_frames_with_data > 0:
+        avg_ankles_per_frame = total_ankle_detections / total_frames_with_data
+        logging.info(f"✓ Enhanced Stage 3 ankle tracking visualization completed")
+        logging.info(f"✓ Output saved to: {output_path}")
+        logging.info(f"✓ Processed {total_frames_with_data}/{frame_count} frames ({total_frames_with_data/frame_count:.1%} coverage)")
+        logging.info(f"✓ Total ankle detections: {total_ankle_detections}")
+        logging.info(f"✓ Average ankles per frame: {avg_ankles_per_frame:.1f}")
+    else:
+        logging.warning("No ankle tracking data found in frames")
+        logging.info(f"✓ Video visualization saved to: {output_path} (no tracking data overlay)")
 
 def visualize_stage4(video_path: str, data_path: str, output_path: str, num_threads: int = None):
     """Stage 4 visualization: Enhanced ankle-only corrected position comparison"""
