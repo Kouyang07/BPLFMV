@@ -32,7 +32,7 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 # Badminton court dimensions (in meters) - Standard international court
 COURT_LENGTH = 13.4  # baseline to baseline
 COURT_WIDTH = 6.1    # sideline to sideline
-MAX_JUMP_HEIGHT = 1.25  # maximum expected jump height in meters
+MAX_JUMP_HEIGHT = 0.75  # maximum expected jump height in meters
 
 # YOLO pose keypoint indices (COCO format)
 ANKLE_KNEE_INDICES = [13, 14, 15, 16]  # left_knee, right_knee, left_ankle, right_ankle
