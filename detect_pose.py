@@ -9,7 +9,7 @@ Implementation based on research paper methodology:
 - Ankle-knee joint validation for player filtering
 - Sequential player detection without Y-position based ID assignment
 
-Reads calibration data from enhanced_court_detection.py and outputs pose.json with validated player poses.
+Reads calibration data from detect_court.py and outputs pose.json with validated player poses.
 """
 
 import cv2
@@ -41,7 +41,7 @@ CONFIDENCE_THRESHOLD = 0.5  # minimum confidence for joint detection
 
 
 def read_calibration_csv(csv_path):
-    """Read calibration data from enhanced_court_detection.py format."""
+    """Read calibration data from detect_court.py format."""
     calibration_data = {
         'camera_matrix': None,
         'dist_coeffs': None,
@@ -70,60 +70,63 @@ def read_calibration_csv(csv_path):
             key = row[0].strip()
             value = row[1].strip() if len(row) > 1 else ''
 
-            # Detect section
-            if key == 'fx':
-                current_section = 'camera_matrix'
-                calibration_data['camera_matrix'] = np.zeros((3, 3), dtype=np.float32)
-                calibration_data['camera_matrix'][2, 2] = 1.0
-                calibration_data['camera_matrix'][0, 0] = float(value)
-            elif key == 'fy' and current_section == 'camera_matrix':
-                calibration_data['camera_matrix'][1, 1] = float(value)
-            elif key == 'cx' and current_section == 'camera_matrix':
-                calibration_data['camera_matrix'][0, 2] = float(value)
-            elif key == 'cy' and current_section == 'camera_matrix':
-                calibration_data['camera_matrix'][1, 2] = float(value)
-            elif key in ['k1', 'k2', 'p1', 'p2', 'k3']:
-                if calibration_data['dist_coeffs'] is None:
-                    calibration_data['dist_coeffs'] = np.zeros(5, dtype=np.float32)
-                idx_map = {'k1': 0, 'k2': 1, 'p1': 2, 'p2': 3, 'k3': 4}
-                calibration_data['dist_coeffs'][idx_map[key]] = float(value)
-            elif key == 'rx':
-                current_section = 'pose'
-                calibration_data['rvec'] = np.zeros(3, dtype=np.float32)
-                calibration_data['rvec'][0] = float(value)
-            elif key == 'ry' and current_section == 'pose':
-                calibration_data['rvec'][1] = float(value)
-            elif key == 'rz' and current_section == 'pose':
-                calibration_data['rvec'][2] = float(value)
-            elif key == 'tx':
-                calibration_data['tvec'] = np.zeros(3, dtype=np.float32)
-                calibration_data['tvec'][0] = float(value)
-            elif key == 'ty' and current_section == 'pose':
-                calibration_data['tvec'][1] = float(value)
-            elif key == 'tz' and current_section == 'pose':
-                calibration_data['tvec'][2] = float(value)
-            elif key == 'reprojection_error_px':
-                calibration_data['reprojection_error'] = float(value)
-            elif key == 'calibration_strategy':
-                calibration_data['calibration_method'] = value
-            elif key == 'Point':
-                current_section = 'points'
-            elif current_section == 'points' and len(row) >= 2:
-                point_name = row[0].strip()
-                try:
-                    error = float(row[1]) if len(row) > 1 else None
-                    # Since points are inlier points, we assume they're already in the correct coordinate system
-                    if point_name in calibration_data['court_points']:
-                        # Handle potential duplicate points by keeping the one with lower error if available
-                        if error is not None and calibration_data['court_points'][point_name][2] is not None:
-                            if error < calibration_data['court_points'][point_name][2]:
-                                calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
-                        else:
-                            calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
-                    else:
-                        calibration_data['court_points'][point_name] = [float(row[2]), float(row[3]), error]
-                except (ValueError, IndexError):
+            try:
+                # Camera matrix parameters
+                if key == 'fx':
+                    current_section = 'camera_matrix'
+                    calibration_data['camera_matrix'] = np.zeros((3, 3), dtype=np.float32)
+                    calibration_data['camera_matrix'][2, 2] = 1.0
+                    calibration_data['camera_matrix'][0, 0] = float(value)
+                elif key == 'fy' and current_section == 'camera_matrix':
+                    calibration_data['camera_matrix'][1, 1] = float(value)
+                elif key == 'cx' and current_section == 'camera_matrix':
+                    calibration_data['camera_matrix'][0, 2] = float(value)
+                elif key == 'cy' and current_section == 'camera_matrix':
+                    calibration_data['camera_matrix'][1, 2] = float(value)
+
+                # Distortion coefficients
+                elif key in ['k1', 'k2', 'k3', 'p1', 'p2']:
+                    if calibration_data['dist_coeffs'] is None:
+                        calibration_data['dist_coeffs'] = np.zeros(5, dtype=np.float32)
+                    idx_map = {'k1': 0, 'k2': 1, 'p1': 2, 'p2': 3, 'k3': 4}
+                    calibration_data['dist_coeffs'][idx_map[key]] = float(value)
+
+                # Camera pose parameters
+                elif key == 'rx':
+                    current_section = 'pose'
+                    calibration_data['rvec'] = np.zeros(3, dtype=np.float32)
+                    calibration_data['rvec'][0] = float(value)
+                elif key == 'ry' and current_section == 'pose':
+                    calibration_data['rvec'][1] = float(value)
+                elif key == 'rz' and current_section == 'pose':
+                    calibration_data['rvec'][2] = float(value)
+                elif key == 'tx':
+                    if calibration_data['tvec'] is None:
+                        calibration_data['tvec'] = np.zeros(3, dtype=np.float32)
+                    calibration_data['tvec'][0] = float(value)
+                elif key == 'ty':
+                    if calibration_data['tvec'] is None:
+                        calibration_data['tvec'] = np.zeros(3, dtype=np.float32)
+                    calibration_data['tvec'][1] = float(value)
+                elif key == 'tz':
+                    if calibration_data['tvec'] is None:
+                        calibration_data['tvec'] = np.zeros(3, dtype=np.float32)
+                    calibration_data['tvec'][2] = float(value)
+
+                # Quality metrics
+                elif key == 'reprojection_error_px':
+                    calibration_data['reprojection_error'] = float(value)
+                elif key == 'calibration_strategy':
+                    calibration_data['calibration_method'] = value
+
+                # Point error data (skip this section for now)
+                elif key == 'Point':
+                    current_section = 'point_errors'
                     continue
+
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Could not parse row {row}: {e}")
+                continue
 
     # Set image size based on cx, cy if available
     if calibration_data['camera_matrix'] is not None:
@@ -132,14 +135,56 @@ def read_calibration_csv(csv_path):
         calibration_data['image_size'] = [int(cx * 2), int(cy * 2)]  # Approximate from principal point
 
     print(f"Loaded calibration data:")
-    print(f"  - {len(calibration_data['court_points'])} court points")
     print(f"  - Camera matrix: {'✓' if calibration_data['camera_matrix'] is not None else '✗'}")
     print(f"  - Distortion coefficients: {'✓' if calibration_data['dist_coeffs'] is not None else '✗'}")
     print(f"  - Pose parameters: {'✓' if calibration_data['rvec'] is not None else '✗'}")
-    print(f"  - Reprojection error: {calibration_data['reprojection_error']:.2f} pixels")
-    print(f"  - Calibration method: {calibration_data['calibration_method']}")
+    if calibration_data['reprojection_error'] is not None:
+        print(f"  - Reprojection error: {calibration_data['reprojection_error']:.2f} pixels")
+    if calibration_data['calibration_method']:
+        print(f"  - Calibration method: {calibration_data['calibration_method']}")
 
     return calibration_data
+
+
+def read_court_points_csv(csv_path):
+    """Read court points from the court.csv file."""
+    court_points = {}
+
+    if not os.path.exists(csv_path):
+        print(f"Court points CSV not found: {csv_path}")
+        return court_points
+
+    with open(csv_path, 'r') as f:
+        # Check if header exists
+        first_line = f.readline().strip()
+        f.seek(0)
+
+        if 'Point' in first_line and 'X' in first_line:
+            print("📋 Court CSV has header row")
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    name = row['Point'].strip()
+                    x = float(row['X'])
+                    y = float(row['Y'])
+                    court_points[name] = [x, y]
+                except (ValueError, KeyError) as e:
+                    print(f"⚠️  Skipping invalid row: {e}")
+        else:
+            print("📋 Court CSV without header")
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 3:
+                    try:
+                        name = row[0].strip()
+                        x = float(row[1])
+                        y = float(row[2])
+                        court_points[name] = [x, y]
+                    except (ValueError, IndexError):
+                        continue
+
+    print(f"✅ Loaded {len(court_points)} court points")
+    return court_points
 
 
 def extract_corner_points(all_court_points):
@@ -150,15 +195,16 @@ def extract_corner_points(all_court_points):
     for i in range(1, 5):
         point_name = f"P{i}"
         if point_name in all_court_points:
-            corner_points[point_name] = [all_court_points[point_name][0], all_court_points[point_name][1]]
+            corner_points[point_name] = all_court_points[point_name]
 
     if len(corner_points) == 4:
+        print(f"✅ Found all corner points: {list(corner_points.keys())}")
         return corner_points
 
     # Fallback: use first 4 points if P1-P4 not available
-    print("Warning: P1-P4 not found, using first 4 points as corners")
+    print("⚠️  P1-P4 not found, using first 4 points as corners")
     point_items = list(all_court_points.items())[:4]
-    return {f"P{i+1}": [coords[0], coords[1]] for i, (_, coords) in enumerate(point_items)}
+    return {f"P{i+1}": coords for i, (_, coords) in enumerate(point_items)}
 
 
 def get_3d_court_points():
@@ -167,10 +213,10 @@ def get_3d_court_points():
     Standard badminton court on ground plane (z=0).
     """
     return {
-        'P1': np.array([0.0, 0.0, 0.0]),          # near-left corner
-        'P2': np.array([0.0, COURT_LENGTH, 0.0]), # far-left corner
-        'P3': np.array([COURT_WIDTH, COURT_LENGTH, 0.0]), # far-right corner
-        'P4': np.array([COURT_WIDTH, 0.0, 0.0])   # near-right corner
+        'P1': np.array([0.0, 0.0, 0.0]),          # top-left corner
+        'P2': np.array([0.0, COURT_LENGTH, 0.0]), # bottom-left corner
+        'P3': np.array([COURT_WIDTH, COURT_LENGTH, 0.0]), # bottom-right corner
+        'P4': np.array([COURT_WIDTH, 0.0, 0.0])   # top-right corner
     }
 
 
@@ -194,14 +240,14 @@ def calculate_camera_elevation_angle(rvec, tvec):
         # Calculate elevation angle
         theta = np.arctan(h_camera / max(d_court, 0.1))  # Avoid division by zero
 
-        print(f"  Camera height: {h_camera:.2f}m")
-        print(f"  Distance to court center: {d_court:.2f}m")
-        print(f"  Elevation angle: {np.degrees(theta):.1f}°")
+        print(f"  📐 Camera height: {h_camera:.2f}m")
+        print(f"  📏 Distance to court center: {d_court:.2f}m")
+        print(f"  📐 Elevation angle: {np.degrees(theta):.1f}°")
 
         return theta, h_camera, d_court
 
     except Exception as e:
-        print(f"Elevation angle calculation failed: {e}")
+        print(f"⚠️  Elevation angle calculation failed: {e}")
         return np.radians(30), 5.0, 10.0  # Default values
 
 
@@ -210,6 +256,8 @@ def create_perspective_aware_boundary(corner_points_2d, rvec, tvec):
     Create perspective-aware enlarged court boundary using calibrated camera parameters.
     """
     try:
+        print("🔧 Creating perspective-aware boundary...")
+
         # Calculate camera elevation angle
         theta, h_camera, d_court = calculate_camera_elevation_angle(rvec, tvec)
 
@@ -243,7 +291,7 @@ def create_perspective_aware_boundary(corner_points_2d, rvec, tvec):
             extension_pixels = extension_distance * pixels_per_meter
             extensions[region] = min(extension_pixels, court_length_pixels * 0.3)  # Limit extension
 
-        print(f"  Extension distances (pixels): {extensions}")
+        print(f"  📏 Extension distances (pixels): {extensions}")
 
         # Apply asymmetric extension
         enlarged_corners = {}
@@ -279,19 +327,20 @@ def create_perspective_aware_boundary(corner_points_2d, rvec, tvec):
             else:
                 enlarged_corners[point_name] = corner_points_2d[point_name]
 
-        print("✓ Perspective-aware boundary enlargement completed")
+        print("✅ Perspective-aware boundary enlargement completed")
         return enlarged_corners
 
     except Exception as e:
-        print(f"✗ Perspective-aware enlargement failed: {e}")
+        print(f"❌ Perspective-aware enlargement failed: {e}")
         return None
 
 
 def enlarge_court_boundary_uniform(corner_points, enlargement_factor=0.3):
     """Fallback uniform court boundary enlargement."""
-    print(f"Using fallback uniform enlargement ({enlargement_factor*100:.0f}%)")
+    print(f"🔧 Using fallback uniform enlargement ({enlargement_factor*100:.0f}%)")
 
     if len(corner_points) != 4:
+        print(f"⚠️  Expected 4 corner points, got {len(corner_points)}")
         return corner_points
 
     # Calculate center of the court
@@ -314,6 +363,7 @@ def enlarge_court_boundary_uniform(corner_points, enlargement_factor=0.3):
 
         enlarged_points[point_name] = [float(new_x), float(new_y)]
 
+    print(f"✅ Uniform enlargement applied to {len(enlarged_points)} points")
     return enlarged_points
 
 
@@ -324,10 +374,15 @@ def is_point_in_court(point, corner_points, enlarged_boundary=None):
     # Use enlarged boundary if provided
     boundary_points = enlarged_boundary if enlarged_boundary is not None else corner_points
 
-    # Create polygon from corner points
-    polygon = [boundary_points[f"P{i}"] for i in range(1, 5) if f"P{i}" in boundary_points]
+    # Create polygon from corner points (ensure proper order)
+    polygon = []
+    for i in range(1, 5):
+        point_name = f"P{i}"
+        if point_name in boundary_points:
+            polygon.append(boundary_points[point_name])
 
     if len(polygon) != 4:
+        print(f"⚠️  Invalid polygon: only {len(polygon)} points")
         return True  # Allow all points if boundary detection failed
 
     # Ray casting algorithm for point-in-polygon test
@@ -413,7 +468,7 @@ class EnhancedPoseDetector:
 
     def _setup_yolo(self):
         """Setup YOLOv11x-pose model."""
-        print(f"Loading YOLOv11x-pose model on device: {self.device}")
+        print(f"🤖 Loading YOLOv11x-pose model on device: {self.device}")
 
         # Look for YOLO model in common locations
         model_paths = [
@@ -426,11 +481,11 @@ class EnhancedPoseDetector:
         for path in model_paths:
             if os.path.exists(path):
                 model_path = path
-                print(f"Found YOLO model: {path}")
+                print(f"✅ Found YOLO model: {path}")
                 break
 
         if model_path is None:
-            print("YOLO model not found locally, downloading...")
+            print("📥 YOLO model not found locally, downloading...")
             model_path = 'yolo11x-pose.pt'
 
         # Load model with suppressed output
@@ -444,6 +499,8 @@ class EnhancedPoseDetector:
                 self.pose_model = YOLO(model_path, verbose=False)
                 self.pose_model.to(self.device)
 
+        print("✅ YOLO model loaded successfully")
+
     def detect_poses(self, frame):
         """Detect human poses in frame using YOLOv11x-pose."""
         with warnings.catch_warnings():
@@ -451,13 +508,15 @@ class EnhancedPoseDetector:
             results = self.pose_model(frame, verbose=False)
         return results
 
-    def process_video(self, video_path, calibration_data, output_json_path):
+    def process_video(self, video_path, calibration_data, court_points, output_json_path):
         """Process video for enhanced pose estimation using calibrated parameters."""
-        print(f"Processing video: {video_path}")
+        print(f"🎬 Processing video: {video_path}")
 
-        # Extract court data and camera parameters
-        all_court_points = calibration_data['court_points']
-        corner_points = extract_corner_points(all_court_points)
+        # Extract corner points from court detection
+        corner_points = extract_corner_points(court_points)
+
+        if len(corner_points) < 4:
+            raise ValueError(f"Need at least 4 corner points, got {len(corner_points)}")
 
         camera_matrix = calibration_data['camera_matrix']
         dist_coeffs = calibration_data['dist_coeffs']
@@ -465,34 +524,37 @@ class EnhancedPoseDetector:
         tvec = calibration_data['tvec']
 
         print("\n=== Enhanced Pose Estimation Pipeline ===")
-        print("Using calibrated camera parameters for accurate pose estimation...")
+        print("🔧 Using calibrated camera parameters for accurate pose estimation...")
 
         # Create perspective-aware boundary using calibrated parameters
         enlarged_court = None
         enlargement_method = "uniform_fallback"
 
         if camera_matrix is not None and rvec is not None and tvec is not None:
+            print("🎯 Attempting perspective-aware boundary creation...")
             enlarged_court = create_perspective_aware_boundary(corner_points, rvec, tvec)
             if enlarged_court is not None:
                 enlargement_method = "perspective_aware_calibrated"
+                print("✅ Perspective-aware boundary created successfully")
 
         # Fallback to uniform enlargement
         if enlarged_court is None:
-            print("Falling back to uniform enlargement...")
+            print("⚠️  Falling back to uniform enlargement...")
             enlarged_court = enlarge_court_boundary_uniform(corner_points, enlargement_factor=0.3)
 
-        print(f"Court enlargement method: {enlargement_method}")
+        print(f"🔧 Court enlargement method: {enlargement_method}")
         print("=========================================\n")
 
         # Get video information
         video_info = get_video_info(video_path)
+        print(f"📹 Video: {video_info['width']}x{video_info['height']}, {video_info['frame_count']} frames @ {video_info['fps']:.1f}fps")
 
         # Process all frames (assuming all are rally frames for this implementation)
         rally_frames = set(range(0, video_info["frame_count"]))
 
-        print(f"Processing {len(rally_frames)} frames...")
-        print(f"Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
-        print(f"No automatic player ID assignment - sequential detection only")
+        print(f"🏃 Processing {len(rally_frames)} frames...")
+        print(f"✅ Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
+        print(f"🎯 No automatic player ID assignment - sequential detection only")
 
         cap = cv2.VideoCapture(video_path)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -561,7 +623,7 @@ class EnhancedPoseDetector:
         output_data = {
             "court_points": corner_points,
             "enlarged_court_points": enlarged_court,
-            "all_court_points": {k: [v[0], v[1]] for k, v in all_court_points.items()},
+            "all_court_points": court_points,
             "video_info": video_info,
             "rally_frames": list(rally_frames),
             "pose_data": all_pose_data,
@@ -576,7 +638,7 @@ class EnhancedPoseDetector:
             },
             "processing_info": {
                 "total_poses_detected": len(all_pose_data),
-                "total_court_points": len(all_court_points),
+                "total_court_points": len(court_points),
                 "corner_points_used": list(corner_points.keys()),
                 "enlargement_method": enlargement_method,
                 "max_jump_height_considered": f"{MAX_JUMP_HEIGHT}m",
@@ -589,7 +651,7 @@ class EnhancedPoseDetector:
                 "pose_estimator": "Enhanced Pose Estimation with Calibrated Camera Parameters",
                 "court_dimensions": f"{COURT_LENGTH}m x {COURT_WIDTH}m",
                 "implementation_features": [
-                    "Calibrated camera parameters from enhanced_court_detection.py",
+                    "Calibrated camera parameters from detect_court.py",
                     "Perspective-n-Point (PnP) camera pose from calibration",
                     "Intelligent boundary extension based on calibrated elevation angle",
                     "Ankle-knee joint validation for player filtering",
@@ -605,11 +667,11 @@ class EnhancedPoseDetector:
             json.dump(output_data, f, indent=2)
 
         print(f"\n=== Processing Complete ===")
-        print(f"✓ Total valid poses detected: {len(all_pose_data)}")
-        print(f"✓ Enlargement method: {enlargement_method}")
-        print(f"✓ Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
-        print(f"✓ Camera calibration: {'Calibrated' if camera_matrix is not None else 'Estimated'}")
-        print(f"✓ Data saved to: {output_json_path}")
+        print(f"✅ Total valid poses detected: {len(all_pose_data)}")
+        print(f"🔧 Enlargement method: {enlargement_method}")
+        print(f"✅ Validation: {MIN_ANKLE_KNEE_JOINTS}+ ankle/knee joints required")
+        print(f"🎯 Camera calibration: {'Calibrated' if camera_matrix is not None else 'Estimated'}")
+        print(f"💾 Data saved to: {output_json_path}")
         print("===========================")
 
         return output_json_path
@@ -624,7 +686,7 @@ def main(video_path):
     print("="*80)
     print("Implementation features:")
     print("• YOLOv11x-pose for human keypoint detection")
-    print("• Calibrated camera parameters from enhanced_court_detection.py")
+    print("• Calibrated camera parameters from detect_court.py")
     print("• Intelligent boundary extension based on calibrated elevation angle")
     print("• Ankle-knee joint validation for player filtering")
     print("• Sequential pose detection (no automatic player ID assignment)")
@@ -640,30 +702,42 @@ def main(video_path):
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     result_dir = os.path.join("results", base_name)
 
-    # Look for calibration CSV file
-    calibration_csv_path = os.path.join(result_dir, f"{base_name}_fixed_calibration.csv")
+    # Look for calibration CSV file (from detect_court.py)
+    calibration_csv_path = os.path.join(result_dir, "calibration.csv")
+    court_csv_path = os.path.join(result_dir, "court.csv")
+
     if not os.path.exists(calibration_csv_path):
-        # Fallback to court.csv for backward compatibility
-        calibration_csv_path = os.path.join(result_dir, "court.csv")
-        if not os.path.exists(calibration_csv_path):
-            logging.error(f"Calibration data not found in: {result_dir}")
-            logging.error("Please run court detection first: python3 enhanced_court_detection.py <video_path>")
-            return None
+        logging.error(f"Calibration data not found: {calibration_csv_path}")
+        logging.error("Please run court detection first: python3 detect_court.py <video_path>")
+        return None
+
+    if not os.path.exists(court_csv_path):
+        logging.error(f"Court points data not found: {court_csv_path}")
+        logging.error("Please run court detection first: python3 detect_court.py <video_path>")
+        return None
 
     output_json_path = os.path.join(result_dir, "pose.json")
 
     # Load calibration data
     try:
+        print(f"📊 Loading calibration data from: {calibration_csv_path}")
         calibration_data = read_calibration_csv(calibration_csv_path)
+
+        print(f"📍 Loading court points from: {court_csv_path}")
+        court_points = read_court_points_csv(court_csv_path)
+
+        if len(court_points) == 0:
+            raise ValueError("No court points found in CSV file")
+
     except Exception as e:
-        logging.error(f"Failed to load calibration data: {e}")
+        logging.error(f"Failed to load calibration/court data: {e}")
         return None
 
     # Initialize enhanced pose detector
     pose_detector = EnhancedPoseDetector()
 
     try:
-        output_path = pose_detector.process_video(video_path, calibration_data, output_json_path)
+        output_path = pose_detector.process_video(video_path, calibration_data, court_points, output_json_path)
         return output_path
     except Exception as e:
         logging.error(f"Pose estimation failed: {e}")
@@ -675,12 +749,12 @@ def main(video_path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python3 enhanced_pose_estimation.py <input_video_path>")
+        print("Usage: python3 detect_pose.py <input_video_path>")
         print("\nExample:")
-        print("  python3 enhanced_pose_estimation.py samples/badminton_match.mp4")
+        print("  python3 detect_pose.py samples/badminton_match.mp4")
         print("\nRequirements:")
         print("  - Court detection and calibration must be run first")
-        print("  - enhanced_court_detection.py generates calibration data")
+        print("  - detect_court.py generates calibration data")
         print("  - YOLOv11x-pose model (will be downloaded if not found)")
         print("  - OpenCV, PyTorch, Ultralytics")
         sys.exit(1)
@@ -694,8 +768,8 @@ if __name__ == "__main__":
 
     result = main(input_video_path)
     if result:
-        print(f"\n✓ Success! Enhanced pose estimation completed.")
+        print(f"\n✅ Success! Enhanced pose estimation completed.")
         print(f"  Output: {result}")
     else:
-        print(f"\n✗ Failed! Enhanced pose estimation encountered errors.")
+        print(f"\n❌ Failed! Enhanced pose estimation encountered errors.")
         sys.exit(1)

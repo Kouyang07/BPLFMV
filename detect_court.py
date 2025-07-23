@@ -828,6 +828,20 @@ class EnhancedBadmintonCalibratorWithFix:
 
         print(f"✅ Results saved to: {output_path}")
 
+    def save_court_points(self, points: Dict[str, np.ndarray], output_path: str) -> None:
+        """Save court points in format expected by pose detection."""
+        with open(output_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            # Write header
+            writer.writerow(['Point', 'X', 'Y'])
+
+            # Write all detected points
+            for point_name, coords in points.items():
+                writer.writerow([point_name, coords[0], coords[1]])
+
+        print(f"✅ Court points saved to: {output_path}")
+
 
 def run_detection(video_path: str, output_path: str) -> bool:
     """Run court detection binary."""
@@ -875,7 +889,7 @@ def main():
     os.makedirs(result_dir, exist_ok=True)
 
     court_csv = os.path.join(result_dir, "court.csv")
-    output_csv = os.path.join(result_dir, f"{video_name}_fixed_calibration.csv")
+    output_csv = os.path.join(result_dir, "calibration.csv")
 
     print(f"🎬 Video: {args.video_path}")
     print(f"💾 Results: {result_dir}")
@@ -901,6 +915,9 @@ def main():
 
     # Load detected points with automatic coordinate system fixing
     detected_points = calibrator.load_detected_points(court_csv, image_size)
+
+    # Save the corrected court points for pose detection
+    calibrator.save_court_points(detected_points, court_csv)
 
     # Create mirrored version
     mirrored_points = calibrator.get_mirrored_points(detected_points)
@@ -990,6 +1007,7 @@ def main():
                 print(f"   - {warning}")
 
     print(f"✅ Complete! Results saved to: {output_csv}")
+    print(f"✅ Court points saved to: {court_csv}")
     print("\n💡 Note: Coordinate system corrections were applied automatically")
     print("   Final output maintains standard coordinate system (P1 = top-left origin)")
 

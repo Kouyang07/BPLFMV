@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Enhanced Badminton Player Ankle Tracking Script - Frame-Organized Output
+Enhanced Badminton Player Ankle Tracking Script - Stage 3 Visualization Compatible
 
 Tracks individual ankle positions using enhanced homography approach:
-- Organizes output by frame -> players -> ankle detections
-- Removes pixel coordinates from output (only world coordinates)
-- Uses homography as primary method with calibration-based improvements
-- Applies undistortion to improve homography accuracy when calibration available
-- Enhanced ankle-to-ground offset calculation using calibration data
+- Outputs in exact format expected by stage 3 visualization
+- Frame-organized data structure: frame_data[frame_idx][player_id] = {ankles: [...], center_position: {...}}
+- Individual ankle position tracking (left and right separately)
+- Enhanced homography with calibration improvements
+- Proper coordinate system and boundary validation
 
-Key features:
-1. Individual ankle position tracking (left and right separately)
-2. Frame-organized output structure
-3. Homography-only approach with calibration enhancements
-4. Improved ground projection using calibration-informed offsets
-5. Clean boundary validation and quality assessment
+Compatible with visualize.py stage 3 visualization.
 
 Usage: python calculate_location.py <video_file_path> [--debug]
 """
@@ -31,13 +26,13 @@ from collections import defaultdict
 
 
 class EnhancedAnkleTracker:
-    """Enhanced tracker focusing on individual ankle positions with improved homography."""
+    """Enhanced tracker focusing on individual ankle positions with stage 3 visualization compatibility."""
 
-    # Court dimensions (meters)
+    # Court dimensions (meters) - BWF standard
     COURT_WIDTH = 6.1
     COURT_LENGTH = 13.4
 
-    # Pose joint indices
+    # Pose joint indices (COCO format)
     ANKLE_LEFT = 15
     ANKLE_RIGHT = 16
 
@@ -52,7 +47,7 @@ class EnhancedAnkleTracker:
         self.video_name = self.video_path.stem
         self.results_dir = Path("results") / self.video_name
         self.pose_file = self.results_dir / "pose.json"
-        self.calibration_file = self.results_dir / f"{self.video_name}_fixed_calibration.csv"
+        self.calibration_file = self.results_dir / "calibration.csv"
         self.output_file = self.results_dir / "positions.json"
         self.debug = debug
 
@@ -73,8 +68,8 @@ class EnhancedAnkleTracker:
         self.pixel_to_meter_ratio = None
         self.enhanced_ankle_offset = None
 
-        # Frame-organized output structure
-        self.frame_data = defaultdict(lambda: defaultdict(list))
+        # Frame-organized output structure (compatible with stage 3 visualization)
+        self.frame_data = {}  # Will be serialized as dict, not defaultdict
 
     def load_calibration_data(self) -> None:
         """Load calibration data for homography enhancement."""
@@ -96,22 +91,27 @@ class EnhancedAnkleTracker:
                     key = row[0].strip()
                     value = row[1].strip()
 
-                    # Detect section
-                    if key == 'fx':
-                        current_section = 'camera_matrix'
-                        calibration_params['fx'] = float(value)
-                    elif key == 'fy' and current_section == 'camera_matrix':
-                        calibration_params['fy'] = float(value)
-                    elif key == 'cx' and current_section == 'camera_matrix':
-                        calibration_params['cx'] = float(value)
-                    elif key == 'cy' and current_section == 'camera_matrix':
-                        calibration_params['cy'] = float(value)
-                    elif key in ['k1', 'k2', 'p1', 'p2', 'k3']:
-                        calibration_params[key] = float(value)
-                    elif key == 'camera_height_m':
-                        calibration_params['camera_height_m'] = float(value)
-                    elif key == 'reprojection_error_px':
-                        calibration_params['reprojection_error_px'] = float(value)
+                    try:
+                        # Camera matrix parameters
+                        if key == 'fx':
+                            current_section = 'camera_matrix'
+                            calibration_params['fx'] = float(value)
+                        elif key == 'fy' and current_section == 'camera_matrix':
+                            calibration_params['fy'] = float(value)
+                        elif key == 'cx' and current_section == 'camera_matrix':
+                            calibration_params['cx'] = float(value)
+                        elif key == 'cy' and current_section == 'camera_matrix':
+                            calibration_params['cy'] = float(value)
+                        elif key in ['k1', 'k2', 'p1', 'p2', 'k3']:
+                            calibration_params[key] = float(value)
+                        elif key == 'camera_height_m':
+                            calibration_params['camera_height_m'] = float(value)
+                        elif key == 'reprojection_error_px':
+                            calibration_params['reprojection_error_px'] = float(value)
+                    except (ValueError, IndexError) as e:
+                        if self.debug:
+                            print(f"Warning: Could not parse calibration row {row}: {e}")
+                        continue
 
             # Reconstruct camera matrix
             if all(param in calibration_params for param in ['fx', 'fy', 'cx', 'cy']):
@@ -154,7 +154,7 @@ class EnhancedAnkleTracker:
             self.calibration_available = (
                     self.camera_matrix is not None and
                     self.camera_height is not None and
-                    (self.reprojection_error is None or self.reprojection_error < 30.0)
+                    (self.reprojection_error is None or self.reprojection_error < 30)
             )
 
             if self.calibration_available:
@@ -200,28 +200,52 @@ class EnhancedAnkleTracker:
 
         self.pose_data = data
         self.video_info = data.get('video_info', {})
+
+        # Get court points - try multiple possible locations
         self.court_points = data.get('court_points', {})
+        if not self.court_points:
+            # Try alternative locations in the pose data
+            self.court_points = data.get('all_court_points', {})
+
         if not self.court_points:
             raise ValueError("No court points found in pose data")
 
         print(f"✓ Loaded pose data with {len(data.get('pose_data', []))} detections")
         print(f"✓ Loaded {len(self.court_points)} court points")
 
+        if self.debug:
+            print("Available court points:")
+            for name, coords in self.court_points.items():
+                print(f"  {name}: {coords}")
+
     def calculate_homography(self) -> None:
         """Calculate homography matrix from court corners."""
         required_corners = ['P1', 'P2', 'P3', 'P4']
+
+        # Check which corners are available
+        available_corners = [corner for corner in required_corners if corner in self.court_points]
         missing_corners = [corner for corner in required_corners if corner not in self.court_points]
 
-        if missing_corners:
+        if len(available_corners) < 4:
+            print(f"Available corners: {available_corners}")
+            print(f"Missing corners: {missing_corners}")
+            print(f"All available court points: {list(self.court_points.keys())}")
             raise ValueError(f"Missing required court corners: {missing_corners}")
 
-        image_points = np.array([
-            self.court_points['P1'],  # Top-left
-            self.court_points['P2'],  # Bottom-left
-            self.court_points['P3'],  # Bottom-right
-            self.court_points['P4']   # Top-right
-        ], dtype=np.float32)
+        # Extract corner coordinates - handle both list and dict formats
+        image_points = []
+        for corner in required_corners:
+            coords = self.court_points[corner]
+            if isinstance(coords, list) and len(coords) >= 2:
+                image_points.append([coords[0], coords[1]])
+            elif isinstance(coords, dict) and 'x' in coords and 'y' in coords:
+                image_points.append([coords['x'], coords['y']])
+            else:
+                raise ValueError(f"Invalid coordinate format for {corner}: {coords}")
 
+        image_points = np.array(image_points, dtype=np.float32)
+
+        # World coordinates for standard badminton court
         world_points = np.array([
             [0, 0],                    # P1: Top-left
             [0, self.COURT_LENGTH],    # P2: Bottom-left
@@ -230,7 +254,7 @@ class EnhancedAnkleTracker:
         ], dtype=np.float32)
 
         self.homography_matrix, _ = cv2.findHomography(
-            image_points, world_points, cv2.RANSAC
+            image_points, world_points, cv2.RANSAC, ransacReprojThreshold=5.0
         )
 
         if self.homography_matrix is None:
@@ -240,7 +264,11 @@ class EnhancedAnkleTracker:
         if self.debug:
             print("Court corners (pixels):")
             for i, corner in enumerate(required_corners):
-                px, py = self.court_points[corner]
+                coords = self.court_points[corner]
+                if isinstance(coords, list):
+                    px, py = coords[0], coords[1]
+                else:
+                    px, py = coords['x'], coords['y']
                 print(f"  {corner}: ({px:.1f}, {py:.1f})")
 
     def undistort_point(self, point: Tuple[float, float]) -> Tuple[float, float]:
@@ -327,11 +355,19 @@ class EnhancedAnkleTracker:
         ankle_left_pixel = self.extract_joint_position(joints, self.ANKLE_LEFT)
         if ankle_left_pixel:
             left_world_x, left_world_y = self.calculate_ankle_ground_position(ankle_left_pixel, "left")
+
+            # Get confidence for this joint
+            left_confidence = 0.0
+            for joint in joints:
+                if joint['joint_index'] == self.ANKLE_LEFT:
+                    left_confidence = joint['confidence']
+                    break
+
             ankle_detections.append({
                 'ankle_side': 'left',
                 'world_x': left_world_x,
                 'world_y': left_world_y,
-                'joint_confidence': next(joint['confidence'] for joint in joints if joint['joint_index'] == self.ANKLE_LEFT),
+                'joint_confidence': left_confidence,
                 'method': 'enhanced_homography' if self.calibration_available else 'basic_homography'
             })
 
@@ -339,17 +375,25 @@ class EnhancedAnkleTracker:
         ankle_right_pixel = self.extract_joint_position(joints, self.ANKLE_RIGHT)
         if ankle_right_pixel:
             right_world_x, right_world_y = self.calculate_ankle_ground_position(ankle_right_pixel, "right")
+
+            # Get confidence for this joint
+            right_confidence = 0.0
+            for joint in joints:
+                if joint['joint_index'] == self.ANKLE_RIGHT:
+                    right_confidence = joint['confidence']
+                    break
+
             ankle_detections.append({
                 'ankle_side': 'right',
                 'world_x': right_world_x,
                 'world_y': right_world_y,
-                'joint_confidence': next(joint['confidence'] for joint in joints if joint['joint_index'] == self.ANKLE_RIGHT),
+                'joint_confidence': right_confidence,
                 'method': 'enhanced_homography' if self.calibration_available else 'basic_homography'
             })
 
         return ankle_detections
 
-    def assign_player_ids(self, frame_ankle_data: Dict[int, List[Dict]]) -> Dict[str, List[Dict]]:
+    def assign_player_ids(self, frame_ankle_data: Dict[int, List[Dict]]) -> Dict[str, Dict[str, Any]]:
         """Assign player IDs based on court position and person grouping."""
         if not frame_ankle_data:
             return {}
@@ -372,7 +416,7 @@ class EnhancedAnkleTracker:
         # Sort by Y position and assign player IDs
         person_positions.sort(key=lambda p: p['avg_y'])
 
-        # Create frame structure with player assignments
+        # Create frame structure with player assignments (exact format expected by stage 3)
         frame_players = {}
         for player_id, person_data in enumerate(person_positions[:2]):  # Max 2 players
             frame_players[f"player_{player_id}"] = {
@@ -400,11 +444,16 @@ class EnhancedAnkleTracker:
         if frame_ankle_data:
             player_assignments = self.assign_player_ids(frame_ankle_data)
             if player_assignments:
+                # Store as regular dict (not defaultdict) for JSON serialization
                 self.frame_data[frame_index] = player_assignments
 
     def process_all_frames(self) -> None:
         """Process all frames."""
         pose_data = self.pose_data.get('pose_data', [])
+
+        if not pose_data:
+            print("⚠️  No pose data found in pose.json")
+            return
 
         # Group by frame
         frames_data = {}
@@ -414,7 +463,7 @@ class EnhancedAnkleTracker:
                 frames_data[frame_idx] = []
             frames_data[frame_idx].append(entry)
 
-        print(f"Processing {len(frames_data)} frames...")
+        print(f"Processing {len(frames_data)} frames with pose data...")
 
         # Process each frame
         for frame_idx in sorted(frames_data.keys()):
@@ -443,13 +492,14 @@ class EnhancedAnkleTracker:
                     else:
                         right_ankles += 1
 
-        print(f"Total ankle detections: {total_ankle_detections}")
-        print(f"Method usage: Enhanced: {enhanced_count}, Basic: {basic_count}")
-        print(f"Ankle distribution: Left: {left_ankles}, Right: {right_ankles}")
+        print(f"📊 Total ankle detections: {total_ankle_detections}")
+        print(f"📊 Method usage: Enhanced: {enhanced_count}, Basic: {basic_count}")
+        print(f"📊 Ankle distribution: Left: {left_ankles}, Right: {right_ankles}")
 
     def validate_results(self) -> None:
         """Validate tracking results."""
         if not self.frame_data:
+            print("⚠️  No frame data to validate")
             return
 
         sample_positions = []
@@ -459,6 +509,7 @@ class EnhancedAnkleTracker:
                     sample_positions.append(ankle)
 
         if len(sample_positions) < 10:
+            print("⚠️  Too few positions for validation")
             return
 
         x_positions = [pos['world_x'] for pos in sample_positions]
@@ -482,13 +533,13 @@ class EnhancedAnkleTracker:
         print(f"Out of bounds: {out_of_bounds}/{len(sample_positions)} ({out_of_bounds/len(sample_positions):.1%})")
 
         if out_of_bounds/len(sample_positions) < 0.1:
-            print("✓ Ankle tracking quality good")
+            print("✅ Ankle tracking quality good")
         else:
-            print("⚠️ High out-of-bounds ratio - check calibration or court corners")
+            print("⚠️  High out-of-bounds ratio - check calibration or court corners")
         print("===============================\n")
 
     def save_results(self) -> None:
-        """Save frame-organized ankle position results."""
+        """Save frame-organized ankle position results in exact format expected by stage 3 visualization."""
         # Calculate summary statistics
         total_frames_with_data = len(self.frame_data)
         total_ankle_detections = 0
@@ -511,14 +562,17 @@ class EnhancedAnkleTracker:
                     else:
                         right_ankle_detections += 1
 
-        # Convert defaultdict to regular dict for JSON serialization
+        # Convert frame indices to strings as expected by visualization
         frame_data_dict = {str(frame_idx): player_data for frame_idx, player_data in self.frame_data.items()}
 
+        # Create output data structure exactly as expected by stage 3 visualization
         output_data = {
             'video_info': {
                 'video_name': self.video_name,
-                'total_frames': self.video_info.get('frame_count', 0),
-                'fps': self.video_info.get('fps', 0)
+                'frame_count': self.video_info.get('frame_count', 0),
+                'fps': self.video_info.get('fps', 0),
+                'width': self.video_info.get('width', 0),
+                'height': self.video_info.get('height', 0)
             },
             'court_info': {
                 'width_meters': self.COURT_WIDTH,
@@ -542,6 +596,7 @@ class EnhancedAnkleTracker:
                 'enhanced_ankle_offset_pixels': self.enhanced_ankle_offset if self.calibration_available else None,
                 'reprojection_error_px': self.reprojection_error if self.calibration_available else None
             },
+            # This is the key structure that stage 3 visualization expects
             'frame_data': frame_data_dict
         }
 
@@ -549,27 +604,46 @@ class EnhancedAnkleTracker:
         with open(self.output_file, 'w') as f:
             json.dump(output_data, f, indent=2)
 
-        print(f"✓ Results saved to: {self.output_file}")
-        print(f"Frames with data: {total_frames_with_data}")
-        print(f"Player 0: {player_0_detections} ankle detections")
-        print(f"Player 1: {player_1_detections} ankle detections")
-        print(f"Left ankles: {left_ankle_detections}, Right ankles: {right_ankle_detections}")
+        print(f"✅ Results saved to: {self.output_file}")
+        print(f"📊 Frames with data: {total_frames_with_data}")
+        print(f"📊 Player 0: {player_0_detections} ankle detections")
+        print(f"📊 Player 1: {player_1_detections} ankle detections")
+        print(f"📊 Left ankles: {left_ankle_detections}, Right ankles: {right_ankle_detections}")
+        print(f"📊 Format: Stage 3 visualization compatible")
 
     def run(self) -> None:
         """Run the enhanced ankle tracking pipeline."""
         print(f"🚀 Starting enhanced individual ankle tracking for: {self.video_name}")
+        print("="*80)
 
         try:
+            print("📊 Step 1: Loading calibration data...")
             self.load_calibration_data()
+
+            print("📍 Step 2: Loading pose data...")
             self.load_pose_data()
+
+            print("🔧 Step 3: Calculating homography...")
             self.calculate_homography()
+
+            print("🏃 Step 4: Processing all frames...")
             self.process_all_frames()
+
+            print("✅ Step 5: Validating results...")
             self.validate_results()
+
+            print("💾 Step 6: Saving results...")
             self.save_results()
+
+            print("="*80)
             print("✅ Enhanced ankle tracking completed successfully!")
+            print("✅ Output is compatible with stage 3 visualization")
 
         except Exception as e:
             print(f"❌ Error during processing: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             raise
 
 
@@ -580,16 +654,21 @@ def main():
         print("\nExample:")
         print("  python calculate_location.py samples/badminton_match.mp4")
         print("\nRequirements:")
-        print("  - Court detection must be run first (enhanced_court_detection.py)")
-        print("  - Pose estimation must be run (enhanced_pose_estimation.py)")
+        print("  - Court detection must be run first (detect_court.py)")
+        print("  - Pose estimation must be run (detect_pose.py)")
         print("  - OpenCV, NumPy")
+        print("\nPipeline:")
+        print("  1. python detect_court.py <video_path>")
+        print("  2. python detect_pose.py <video_path>")
+        print("  3. python calculate_location.py <video_path>")
+        print("  4. python visualize.py <video_path> --stage 3")
         sys.exit(1)
 
     video_path = sys.argv[1]
     debug = "--debug" in sys.argv
 
     if not os.path.exists(video_path):
-        print(f"Error: Video file not found: {video_path}")
+        print(f"❌ Error: Video file not found: {video_path}")
         sys.exit(1)
 
     tracker = EnhancedAnkleTracker(video_path, debug=debug)
