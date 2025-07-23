@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Modified Ankle-Only Jump Analysis Script with Enhanced Pipeline Integration
+Physics-Based Ankle-Only Jump Analysis Script with Enhanced Pipeline Integration
 
 Integrates with the complete badminton analysis pipeline:
 - Works with outputs from detect_court.py, detect_pose.py, and calculate_location.py
 - Uses ML model to detect valid jumps, then matches players using court coordinates
-- Corrects ankle position displacement during jump sequences
+- Corrects ankle position displacement during jump sequences using physics-based interpolation
 - Enhanced compatibility with frame-organized position data
 
 Usage:
-    python ankle_only_jump_analyzer.py samples/test.mp4
+    python physics_jump_analyzer.py samples/test.mp4
 """
 
 import cv2
@@ -23,6 +23,162 @@ import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
+
+class PhysicsInterpolator:
+    """Physics-based interpolation for realistic jump trajectories."""
+
+    def __init__(self, gravity: float = 9.81, fps: float = 30.0):
+        """
+        Initialize physics interpolator.
+
+        Args:
+            gravity: Gravitational acceleration (m/s²)
+            fps: Video frame rate (frames/second)
+        """
+        self.gravity = gravity
+        self.fps = fps
+        self.frame_time = 1.0 / fps  # Time per frame in seconds
+
+    def interpolate_jump_trajectory(self, begin_data: Dict, end_data: Dict,
+                                    jump_frame: int, begin_frame: int, end_frame: int,
+                                    target_frame: int) -> Dict:
+        """
+        Physics-based interpolation using projectile motion equations.
+
+        Args:
+            begin_data: Position at jump start {x, y}
+            end_data: Position at jump end {x, y}
+            jump_frame: Frame number of jump peak
+            begin_frame: Jump start frame
+            end_frame: Jump end frame
+            target_frame: Frame to interpolate
+
+        Returns:
+            Interpolated position {x, y}
+        """
+        if end_frame == begin_frame:
+            return begin_data
+
+        # Convert frame numbers to time
+        total_time = (end_frame - begin_frame) * self.frame_time
+        jump_time = (jump_frame - begin_frame) * self.frame_time
+        target_time = (target_frame - begin_frame) * self.frame_time
+
+        # Clamp target time to valid range
+        target_time = max(0, min(target_time, total_time))
+
+        # Calculate displacement
+        dx = end_data['x'] - begin_data['x']
+        dy = end_data['y'] - begin_data['y']
+
+        # Horizontal motion (constant velocity)
+        vx = dx / total_time if total_time > 0 else 0
+
+        # Vertical motion with physics
+        # At jump peak (jump_time): vy = 0
+        # Use kinematic equations to solve for initial vertical velocity
+
+        # For projectile motion: y = y0 + v0y*t - 0.5*g*t^2
+        # At peak: vy = v0y - g*t_peak = 0, so v0y = g*t_peak
+        # Final position: yf = y0 + v0y*T - 0.5*g*T^2
+
+        if jump_time > 0 and jump_time < total_time:
+            # Calculate initial vertical velocity based on jump peak timing
+            # v0y such that at jump_time, vertical velocity is 0
+            v0y = self.gravity * jump_time
+
+            # Adjust v0y to ensure we reach the correct end position
+            # yf = y0 + v0y*T - 0.5*g*T^2 = y0 + dy
+            # Solve for adjustment
+            predicted_dy = v0y * total_time - 0.5 * self.gravity * total_time**2
+            velocity_adjustment = (dy - predicted_dy) / total_time if total_time > 0 else 0
+            v0y += velocity_adjustment
+        else:
+            # Fallback: use average velocity with slight upward bias
+            v0y = dy / total_time if total_time > 0 else 0
+            # Add slight upward initial velocity for more realistic trajectory
+            if abs(dy) < 1.0:  # If vertical movement is small, assume a small jump
+                v0y += 2.0  # Small upward boost
+
+        # Calculate position at target time
+        x = begin_data['x'] + vx * target_time
+        y = begin_data['y'] + v0y * target_time - 0.5 * self.gravity * target_time**2
+
+        # Apply constraints
+        # 1. Don't go below the baseline (assume court level is the minimum of begin/end y)
+        min_y = min(begin_data['y'], end_data['y'])
+        y = max(y, min_y)
+
+        # 2. Ensure reasonable trajectory shape
+        # If we're past the jump peak time, y should be decreasing
+        if target_time > jump_time and jump_time > 0:
+            # Calculate y at jump peak for reference
+            y_peak = begin_data['y'] + v0y * jump_time - 0.5 * self.gravity * jump_time**2
+            # Ensure we don't go higher than the peak after the peak time
+            if y > y_peak:
+                y = y_peak
+
+        # 3. Smooth transition near boundaries
+        boundary_margin = 0.1 * total_time  # 10% of total time
+        if target_time < boundary_margin:
+            # Blend with begin position
+            blend_factor = target_time / boundary_margin
+            x = begin_data['x'] * (1 - blend_factor) + x * blend_factor
+            y = begin_data['y'] * (1 - blend_factor) + y * blend_factor
+        elif target_time > (total_time - boundary_margin):
+            # Blend with end position
+            blend_factor = (total_time - target_time) / boundary_margin
+            x = end_data['x'] * (1 - blend_factor) + x * blend_factor
+            y = end_data['y'] * (1 - blend_factor) + y * blend_factor
+
+        return {'x': float(x), 'y': float(y)}
+
+    def calculate_jump_physics_metrics(self, begin_data: Dict, end_data: Dict,
+                                       jump_data: Dict, begin_frame: int,
+                                       jump_frame: int, end_frame: int) -> Dict:
+        """
+        Calculate physics metrics for the jump.
+
+        Returns:
+            Dictionary containing jump height, velocities, etc.
+        """
+        total_time = (end_frame - begin_frame) * self.frame_time
+        jump_time = (jump_frame - begin_frame) * self.frame_time
+
+        # Calculate jump height (peak y relative to start/end baseline)
+        # Note: In many coordinate systems, y increases downward, so we need to handle this
+        baseline_y = max(begin_data['y'], end_data['y'])  # Use max instead of min for downward y
+        jump_height = baseline_y - jump_data['y']  # Reverse subtraction for downward y
+
+        # If jump height is still negative, the coordinate system might be upward
+        if jump_height < 0:
+            baseline_y = min(begin_data['y'], end_data['y'])
+            jump_height = jump_data['y'] - baseline_y
+
+        # Ensure we have positive jump height (absolute value as fallback)
+        if jump_height < 0:
+            jump_height = abs(jump_height)
+
+        # Calculate horizontal velocity
+        dx = end_data['x'] - begin_data['x']
+        vx = dx / total_time if total_time > 0 else 0
+
+        # Calculate initial vertical velocity
+        v0y = self.gravity * jump_time if jump_time > 0 else 0
+
+        # Calculate maximum theoretical height
+        max_height = (v0y**2) / (2 * self.gravity) if v0y > 0 else 0
+
+        return {
+            'jump_height': float(jump_height),
+            'max_theoretical_height': float(max_height),
+            'horizontal_velocity': float(vx),
+            'initial_vertical_velocity': float(v0y),
+            'total_time': float(total_time),
+            'time_to_peak': float(jump_time),
+            'baseline_y': float(baseline_y),
+            'jump_peak_y': float(jump_data['y'])
+        }
 
 def detect_best_device():
     """Auto-detect best available device."""
@@ -528,6 +684,7 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
                                 'begin_x': begin_x,
                                 'begin_y': begin[1],
                                 'jump_frame': valley_frame,
+                                'jump_x': x_coords[valley_idx] if valley_idx < len(x_coords) else (begin_x + end_x) / 2,
                                 'jump_y': valley_y,
                                 'end_frame': end[0],
                                 'end_x': end_x,
@@ -552,28 +709,37 @@ def correlate_ml_jumps_with_players(ml_jumps, coordinates, position_data, homogr
 
     return correlations
 
-def interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame):
-    """Interpolate position between begin and end frames."""
-    if end_frame == begin_frame:
-        t = 0
+def convert_numpy_types(obj):
+    """Convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
     else:
-        t = (frame - begin_frame) / (end_frame - begin_frame)
+        return obj
 
-    return {
-        'x': float(begin_data['x'] + t * (end_data['x'] - begin_data['x'])),
-        'y': float(begin_data['y'] + t * (end_data['y'] - begin_data['y']))
-    }
+def save_corrected_positions(original_position_data, correlations, coordinates, output_dir, fps):
+    """Save corrected position data with physics-based interpolated jump sequences."""
+    # Always copy original data first and convert numpy types
+    corrected_data = convert_numpy_types(json.loads(json.dumps(original_position_data, default=str)))
 
-def save_corrected_positions(original_position_data, correlations, coordinates, output_dir):
-    """Save corrected position data with interpolated jump sequences."""
-    # Always copy original data first
-    corrected_data = json.loads(json.dumps(original_position_data))
+    # Initialize physics interpolator
+    physics_interpolator = PhysicsInterpolator(gravity=9.81, fps=fps)
 
     # Add metadata about the correction process
     corrected_data['correction_metadata'] = {
         'jumps_detected': len(correlations),
         'correction_applied': len(correlations) > 0,
-        'tracking_method': 'ankle_only_enhanced',
+        'tracking_method': 'ankle_only_physics_enhanced',
+        'interpolation_method': 'physics_based',
+        'gravity': physics_interpolator.gravity,
+        'fps': fps,
         'timestamp': str(np.datetime64('now'))
     }
 
@@ -586,61 +752,66 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
         return
 
     total_interpolated_frames = 0
+    jump_physics_stats = []
 
-    print("Applying corrections...")
-    for corr in tqdm(correlations, desc="Interpolating jumps", unit="jump"):
+    print("Applying physics-based corrections...")
+    for corr in tqdm(correlations, desc="Physics interpolating jumps", unit="jump"):
         player_id = corr['player_id']
         begin_frame = corr['begin_frame']
         end_frame = corr['end_frame']
+        jump_frame = corr['jump_frame']
 
-        print(f"\nInterpolating Player {player_id}: frames {begin_frame} to {end_frame}")
+        print(f"\nPhysics interpolating Player {player_id}: frames {begin_frame} to {end_frame}")
+        print(f"  Jump peak at frame {jump_frame}")
 
-        coord_data = coordinates[player_id]
-        frames = coord_data['frames']
+        # Prepare data for physics interpolation
+        begin_data = {'x': corr['begin_x'], 'y': corr['begin_y']}
+        end_data = {'x': corr['end_x'], 'y': corr['end_y']}
+        jump_data = {'x': corr['jump_x'], 'y': corr['jump_y']}
 
-        # Find begin and end indices
-        begin_idx = np.where(frames == begin_frame)[0]
-        end_idx = np.where(frames == end_frame)[0]
+        # Calculate jump physics metrics
+        physics_metrics = physics_interpolator.calculate_jump_physics_metrics(
+            begin_data, end_data, jump_data, begin_frame, jump_frame, end_frame
+        )
 
-        if len(begin_idx) == 0 or len(end_idx) == 0:
-            print(f"  ❌ Could not find coordinate data")
-            continue
+        # Convert numpy types in physics metrics
+        physics_metrics = convert_numpy_types(physics_metrics)
 
-        begin_idx = begin_idx[0]
-        end_idx = end_idx[0]
+        jump_physics_stats.append({
+            'player_id': int(player_id),
+            'jump_frame': int(jump_frame),
+            'ml_frame': int(corr['ml_frame']),
+            'physics_metrics': physics_metrics
+        })
 
-        # Extract position data for interpolation
-        begin_data = {
-            'x': coord_data['x'][begin_idx],
-            'y': coord_data['y'][end_idx]
-        }
+        print(f"  📊 Jump height: {physics_metrics['jump_height']:.2f}m")
+        print(f"  📊 Horizontal velocity: {physics_metrics['horizontal_velocity']:.2f}m/s")
+        print(f"  📊 Initial vertical velocity: {physics_metrics['initial_vertical_velocity']:.2f}m/s")
+        print(f"  📊 Time to peak: {physics_metrics['time_to_peak']:.2f}s")
 
-        end_data = {
-            'x': coord_data['x'][end_idx],
-            'y': coord_data['y'][end_idx]
-        }
-
-        # Interpolate between begin and end frames
+        # Interpolate between begin and end frames using physics
         frames_interpolated = 0
 
         # Handle frame-organized data structure
         if 'frame_data' in corrected_data:
             for frame in range(begin_frame, end_frame + 1):
-                interpolated = interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame)
+                interpolated = physics_interpolator.interpolate_jump_trajectory(
+                    begin_data, end_data, jump_frame, begin_frame, end_frame, frame
+                )
 
                 frame_key = str(frame)
                 player_key = f"player_{player_id}"
 
                 if frame_key in corrected_data['frame_data'] and player_key in corrected_data['frame_data'][frame_key]:
-                    # Update center position
-                    corrected_data['frame_data'][frame_key][player_key]['center_position']['x'] = interpolated['x']
-                    corrected_data['frame_data'][frame_key][player_key]['center_position']['y'] = interpolated['y']
+                    # Update center position (ensure float conversion)
+                    corrected_data['frame_data'][frame_key][player_key]['center_position']['x'] = float(interpolated['x'])
+                    corrected_data['frame_data'][frame_key][player_key]['center_position']['y'] = float(interpolated['y'])
 
                     # Update ankle positions if they exist
                     if 'ankles' in corrected_data['frame_data'][frame_key][player_key]:
                         for ankle in corrected_data['frame_data'][frame_key][player_key]['ankles']:
-                            ankle['world_x'] = interpolated['x']
-                            ankle['world_y'] = interpolated['y']
+                            ankle['world_x'] = float(interpolated['x'])
+                            ankle['world_y'] = float(interpolated['y'])
 
                     frames_interpolated += 1
 
@@ -652,42 +823,75 @@ def save_corrected_positions(original_position_data, correlations, coordinates, 
                 position_lookup[key] = idx
 
             for frame in range(begin_frame, end_frame + 1):
-                interpolated = interpolate_positions(begin_data, end_data, frame, begin_frame, end_frame)
+                interpolated = physics_interpolator.interpolate_jump_trajectory(
+                    begin_data, end_data, jump_frame, begin_frame, end_frame, frame
+                )
 
                 key = (player_id, frame)
                 if key in position_lookup:
                     pos_idx = position_lookup[key]
                     pos = corrected_data["player_positions"][pos_idx]
 
-                    # Update position components
+                    # Update position components (ensure float conversion)
                     if 'x' in pos and 'y' in pos:
-                        pos['x'] = interpolated['x']
-                        pos['y'] = interpolated['y']
+                        pos['x'] = float(interpolated['x'])
+                        pos['y'] = float(interpolated['y'])
                     elif 'hip_world_X' in pos and 'hip_world_Y' in pos:
-                        pos['hip_world_X'] = interpolated['x']
-                        pos['hip_world_Y'] = interpolated['y']
+                        pos['hip_world_X'] = float(interpolated['x'])
+                        pos['hip_world_Y'] = float(interpolated['y'])
 
                     frames_interpolated += 1
 
-        print(f"  ✅ Interpolated {frames_interpolated} frames")
+        print(f"  ✅ Physics interpolated {frames_interpolated} frames")
         total_interpolated_frames += frames_interpolated
+
+    # Add physics statistics to metadata (ensure JSON serializable)
+    corrected_data['correction_metadata']['jump_physics_stats'] = convert_numpy_types(jump_physics_stats)
 
     # Save corrected data
     output_path = output_dir / "corrected_positions.json"
     with open(output_path, 'w') as f:
         json.dump(corrected_data, f, indent=2)
 
-    print(f"\n✅ Saved corrected positions to: {output_path}")
-    print(f"Summary: Interpolated {total_interpolated_frames} frames across {len(correlations)} jump sequences")
+    # Save physics analysis report
+    physics_report_path = output_dir / "jump_physics_analysis.json"
+    physics_report = convert_numpy_types({
+        'analysis_metadata': {
+            'total_jumps_analyzed': len(correlations),
+            'total_frames_corrected': int(total_interpolated_frames),
+            'physics_model': {
+                'gravity': float(physics_interpolator.gravity),
+                'fps': float(fps),
+                'interpolation_method': 'projectile_motion'
+            },
+            'timestamp': str(np.datetime64('now'))
+        },
+        'jump_analyses': jump_physics_stats
+    })
+
+    with open(physics_report_path, 'w') as f:
+        json.dump(physics_report, f, indent=2)
+
+    print(f"\n✅ Saved physics-corrected positions to: {output_path}")
+    print(f"✅ Saved physics analysis report to: {physics_report_path}")
+    print(f"\n📊 PHYSICS CORRECTION SUMMARY:")
+    print(f"Interpolated {total_interpolated_frames} frames across {len(correlations)} jump sequences")
+
+    if jump_physics_stats:
+        avg_jump_height = np.mean([stat['physics_metrics']['jump_height'] for stat in jump_physics_stats])
+        avg_horizontal_velocity = np.mean([stat['physics_metrics']['horizontal_velocity'] for stat in jump_physics_stats])
+        print(f"Average jump height: {avg_jump_height:.2f}m")
+        print(f"Average horizontal velocity: {avg_horizontal_velocity:.2f}m/s")
 
 def main():
-    parser = argparse.ArgumentParser(description='Modified ankle-only jump analysis with enhanced pipeline integration')
+    parser = argparse.ArgumentParser(description='Physics-based ankle-only jump analysis with enhanced pipeline integration')
     parser.add_argument('video_path', help='Path to the input video file')
     parser.add_argument('--model', default='resources/BLPFMV.pt', help='Path to YOLO model weights')
     parser.add_argument('--confidence', type=float, default=0.2, help='ML detection confidence threshold')
     parser.add_argument('--device', choices=['cuda', 'mps', 'cpu'], help='Force specific device')
     parser.add_argument('--proximity', type=int, default=15, help='Frame proximity for correlating jumps')
     parser.add_argument('--court-distance', type=float, default=4, help='Court distance threshold (meters)')
+    parser.add_argument('--gravity', type=float, default=9.81, help='Gravitational acceleration (m/s²)')
 
     args = parser.parse_args()
 
@@ -701,12 +905,13 @@ def main():
 
     print(f"System: {platform.system()}")
     print(f"PyTorch: {torch.__version__}")
+    print(f"Physics model: g = {args.gravity} m/s²")
 
     try:
         # Step 1: ML jump detection
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print("STEP 1: ML JUMP DETECTION")
-        print("="*50)
+        print("="*60)
 
         ml_jumps, fps = detect_ml_jumps(args.video_path, args.model, args.confidence, args.device)
 
@@ -718,9 +923,9 @@ def main():
             print(f"  {i}. Frame {frame:4d} | Time: {timestamp:6.2f}s | Confidence: {confidence:.3f}")
 
         # Step 2: Load position data and homography
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print("STEP 2: LOADING POSITION DATA")
-        print("="*50)
+        print("="*60)
 
         position_data, output_dir, homography_matrix = load_position_data(args.video_path)
         if not position_data:
@@ -733,9 +938,9 @@ def main():
         # Step 3: Court-based player matching (only if we have both ML jumps and homography)
         correlations = []
         if ml_jumps and homography_matrix is not None:
-            print("\n" + "="*50)
+            print("\n" + "="*60)
             print("STEP 3: COURT-BASED PLAYER MATCHING")
-            print("="*50)
+            print("="*60)
 
             correlations = correlate_ml_jumps_with_players(
                 ml_jumps, coordinates, position_data, homography_matrix,
@@ -755,22 +960,24 @@ def main():
             if homography_matrix is None:
                 print("\n⚠️  No homography matrix available - skipping correlation step")
 
-        # Step 4: Always save corrected positions (even if no corrections applied)
-        print("\n" + "="*50)
-        print("STEP 4: SAVING CORRECTED POSITIONS")
-        print("="*50)
+        # Step 4: Physics-based position correction
+        print("\n" + "="*60)
+        print("STEP 4: PHYSICS-BASED POSITION CORRECTION")
+        print("="*60)
 
-        save_corrected_positions(position_data, correlations, coordinates, output_dir)
+        save_corrected_positions(position_data, correlations, coordinates, output_dir, fps)
 
         # Summary
-        print("\n" + "="*50)
-        print("PROCESSING COMPLETE")
-        print("="*50)
+        print("\n" + "="*60)
+        print("PHYSICS-BASED PROCESSING COMPLETE")
+        print("="*60)
 
         if correlations:
             print(f"✅ Successfully processed {len(ml_jumps)} ML detections")
-            print(f"✅ Applied {len(correlations)} jump corrections")
+            print(f"✅ Applied {len(correlations)} physics-based jump corrections")
+            print(f"✅ Physics model used: projectile motion with g = {args.gravity} m/s²")
             print(f"✅ Corrected positions saved to: {output_dir / 'corrected_positions.json'}")
+            print(f"✅ Physics analysis saved to: {output_dir / 'jump_physics_analysis.json'}")
         else:
             print(f"ℹ️  Processed {len(ml_jumps)} ML detections")
             print(f"ℹ️  No corrections applied (no valid correlations found)")
