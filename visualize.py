@@ -9,6 +9,7 @@ Fully compatible with all pipeline outputs:
 - Stage 4: corrected_positions.json → Jump correction comparison visualization
 
 Features:
+- Professional, clean court visualization
 - Frame-organized data structure support from calculate_location.py
 - Enhanced ankle-only tracking visualization
 - Court coordinate system correction and proper mirroring
@@ -39,7 +40,7 @@ import psutil
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class VideoProcessor:
-    """Enhanced video processing with accurate badminton court visualization"""
+    """Enhanced video processing with professional badminton court visualization"""
 
     def __init__(self, video_path: str, num_threads: Optional[int] = None):
         self.video_path = video_path
@@ -58,16 +59,17 @@ class VideoProcessor:
         self.court_img_h = int((self.court_length_m + 2 * self.margin_m) * self.court_scale)
         self.court_img_w = int((self.court_width_m + 2 * self.margin_m) * self.court_scale)
 
-        # Enhanced color scheme
+        # Professional color scheme - cleaner and more subtle
         self.colors = {
-            'court_boundary': (220, 220, 220),      # Light gray
-            'service_lines': (180, 180, 180),       # Medium gray
-            'center_line': (160, 160, 160),         # Darker gray
-            'net': (255, 255, 255),                 # White
-            'background': (40, 50, 45),             # Dark green
-            'text': (200, 200, 200),                # Light gray
-            'players': [(0, 255, 100), (255, 100, 0), (100, 150, 255),
-                        (255, 200, 0), (255, 0, 150), (0, 255, 255)]
+            'court_boundary': (255, 255, 255),      # Pure white for main lines
+            'service_lines': (220, 220, 220),       # Light gray for service lines
+            'center_line': (200, 200, 200),         # Medium gray for center line
+            'net': (255, 255, 255),                 # White for net
+            'background': (0, 0, 0),            # Professional forest green
+            'text': (255, 255, 255),                # White text
+            'court_fill': (0, 1, 14),            # Slightly lighter green for court area
+            'players': [(255, 87, 34), (33, 150, 243), (156, 39, 176),
+                        (255, 193, 7), (76, 175, 80), (244, 67, 54)]
         }
 
         # Create court template
@@ -93,7 +95,8 @@ class VideoProcessor:
         return info
 
     def _create_court_template(self):
-        """Create accurate badminton court template"""
+        """Create professional, clean badminton court template"""
+        # Start with background
         court_img = np.full((self.court_img_h, self.court_img_w, 3), self.colors['background'], dtype=np.uint8)
 
         # Calculate coordinates
@@ -109,10 +112,10 @@ class VideoProcessor:
         center_x = margin_px + court_width_px // 2
         center_y = margin_px + court_length_px // 2
 
-        # Service dimensions
+        # Service dimensions (BWF standard)
         service_line_distance_px = int(1.98 * self.court_scale)  # 1.98m from net
         back_service_distance_px = int(0.76 * self.court_scale)  # 0.76m from back
-        side_service_distance_px = int(0.46 * self.court_scale)  # Singles margin
+        side_service_distance_px = int(0.46 * self.court_scale)  # Singles margin (0.46m on each side)
 
         # Service court boundaries
         front_service_top = center_y - service_line_distance_px
@@ -124,38 +127,69 @@ class VideoProcessor:
         singles_left = left + side_service_distance_px
         singles_right = right - side_service_distance_px
 
-        # Draw court elements
-        # 1. Main court boundary
-        cv2.rectangle(court_img, (left, top), (right, bottom), self.colors['court_boundary'], 3)
+        # Fill court area with slightly different color
+        cv2.rectangle(court_img, (left, top), (right, bottom), self.colors['court_fill'], -1)
 
-        # 2. Singles lines
-        cv2.line(court_img, (singles_left, top), (singles_left, bottom), self.colors['court_boundary'], 2)
-        cv2.line(court_img, (singles_right, top), (singles_right, bottom), self.colors['court_boundary'], 2)
+        # Draw court elements with professional styling
 
-        # 3. Net line
-        cv2.line(court_img, (left, center_y), (right, center_y), self.colors['net'], 4)
+        # 1. Main court boundary (thicker for prominence)
+        cv2.rectangle(court_img, (left, top), (right, bottom), self.colors['court_boundary'], 4)
 
-        # 4. Center line
-        cv2.line(court_img, (center_x, front_service_top), (center_x, front_service_bottom), self.colors['center_line'], 2)
+        # 2. Singles lines (clean, medium thickness)
+        cv2.line(court_img, (singles_left, top), (singles_left, bottom), self.colors['court_boundary'], 3)
+        cv2.line(court_img, (singles_right, top), (singles_right, bottom), self.colors['court_boundary'], 3)
 
-        # 5. Service lines
+        # 3. Net line (prominent, slightly thicker)
+        cv2.line(court_img, (left, center_y), (right, center_y), self.colors['net'], 5)
+
+        # 4. Center line - EXTENDS ALL THE WAY ACROSS THE COURT
+        cv2.line(court_img, (center_x, top), (center_x, bottom), self.colors['center_line'], 2)
+
+        # 5. Service lines (clean, consistent thickness)
+        # Short service lines
         cv2.line(court_img, (singles_left, front_service_top), (singles_right, front_service_top),
                  self.colors['service_lines'], 2)
         cv2.line(court_img, (singles_left, front_service_bottom), (singles_right, front_service_bottom),
                  self.colors['service_lines'], 2)
+
+        # Long service lines (doubles back boundary for doubles play)
         cv2.line(court_img, (left, back_service_top), (right, back_service_top),
                  self.colors['service_lines'], 2)
         cv2.line(court_img, (left, back_service_bottom), (right, back_service_bottom),
                  self.colors['service_lines'], 2)
 
-        # 6. Net posts
-        cv2.circle(court_img, (left, center_y), 4, self.colors['net'], -1)
-        cv2.circle(court_img, (right, center_y), 4, self.colors['net'], -1)
+        # 6. Net posts (small, clean circles)
+        cv2.circle(court_img, (left, center_y), 5, self.colors['net'], -1)
+        cv2.circle(court_img, (right, center_y), 5, self.colors['net'], -1)
 
-        # 7. Labels
+        # 7. Clean, minimal labeling
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(court_img, "NET", (center_x - 20, center_y - 10),
-                    font, 0.5, self.colors['text'], 1)
+        font_scale = 0.6
+        font_thickness = 2
+
+        # Net label (centered and clean)
+        text_size = cv2.getTextSize("NET", font, font_scale, font_thickness)[0]
+        text_x = center_x - text_size[0] // 2
+        text_y = center_y - 12
+
+        # Add subtle background for text readability
+        cv2.rectangle(court_img, (text_x - 5, text_y - text_size[1] - 3),
+                      (text_x + text_size[0] + 5, text_y + 5),
+                      self.colors['background'], -1)
+        cv2.putText(court_img, "NET", (text_x, text_y), font, font_scale, self.colors['text'], font_thickness)
+
+        # Court dimensions annotations (subtle, in corners)
+        dim_font_scale = 0.4
+        dim_thickness = 1
+        dim_color = (180, 180, 180)
+
+        # Length annotation
+        cv2.putText(court_img, "13.4m", (left + 5, bottom - 10),
+                    font, dim_font_scale, dim_color, dim_thickness)
+
+        # Width annotation
+        cv2.putText(court_img, "6.1m", (right - 40, top + 20),
+                    font, dim_font_scale, dim_color, dim_thickness)
 
         return court_img
 
@@ -175,7 +209,7 @@ class VideoProcessor:
         return frames
 
     def get_color(self, player_id: int) -> Tuple[int, int, int]:
-        """Get color for player"""
+        """Get color for player with better contrast"""
         return self.colors['players'][player_id % len(self.colors['players'])]
 
     def world_to_court(self, x: float, y: float) -> Tuple[int, int]:
@@ -185,21 +219,33 @@ class VideoProcessor:
         return (px, py)
 
     def add_info_panel(self, court_img: np.ndarray, frame_idx: int, info: str) -> np.ndarray:
-        """Add information panel to court visualization"""
+        """Add clean, professional information panel to court visualization"""
         panel_height = 80
-        panel = np.full((panel_height, court_img.shape[1], 3),
-                        tuple(int(c * 0.8) for c in self.colors['background']), dtype=np.uint8)
+        # Use a darker shade of the background for contrast
+        panel_color = tuple(int(c * 0.7) for c in self.colors['background'])
+        panel = np.full((panel_height, court_img.shape[1], 3), panel_color, dtype=np.uint8)
+
+        # Add subtle border
+        cv2.rectangle(panel, (0, 0), (court_img.shape[1]-1, panel_height-1),
+                      self.colors['court_boundary'], 2)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(panel, f"Frame: {frame_idx:06d}", (10, 25),
-                    font, 0.6, self.colors['text'], 1)
-        cv2.putText(panel, info, (10, 50),
-                    font, 0.5, self.colors['text'], 1)
 
+        # Frame counter (larger, more prominent)
+        cv2.putText(panel, f"Frame: {frame_idx:06d}", (15, 30),
+                    font, 0.7, self.colors['text'], 2)
+
+        # Additional info (smaller, secondary)
+        cv2.putText(panel, info, (15, 55),
+                    font, 0.5, (220, 220, 220), 1)
+
+        # Timestamp (right aligned)
         if hasattr(self, 'video_info') and self.video_info["fps"] > 0:
             timestamp = frame_idx / self.video_info["fps"]
-            cv2.putText(panel, f"Time: {timestamp:.2f}s", (200, 25),
-                        font, 0.5, self.colors['text'], 1)
+            time_text = f"Time: {timestamp:.2f}s"
+            text_size = cv2.getTextSize(time_text, font, 0.5, 1)[0]
+            cv2.putText(panel, time_text, (court_img.shape[1] - text_size[0] - 15, 30),
+                        font, 0.5, (200, 200, 200), 1)
 
         return np.vstack([court_img, panel])
 
@@ -257,57 +303,73 @@ def extract_corner_points(all_court_points: Dict) -> np.ndarray:
 
     return np.array(corner_points, dtype=np.float32)
 
-# Visualization functions for each stage
+# Enhanced visualization functions with professional styling
 def draw_court_points(frame: np.ndarray, court_points: Dict, show_labels: bool = True) -> np.ndarray:
-    """Draw court points with enhanced styling"""
+    """Draw court points with professional styling"""
     frame_display = frame.copy()
 
     for point_name, coords in court_points.items():
         if len(coords) >= 2:
             x, y = int(coords[0]), int(coords[1])
 
-            # Point styling based on type
+            # Professional point styling
             if point_name.startswith('P') and point_name[1:].isdigit():
-                color = (0, 255, 255)  # Cyan for corners
-                radius = 8
-                border_color = (255, 255, 255)
-            elif 'Net' in point_name:
-                color = (255, 100, 255)  # Magenta for net
+                color = (255, 215, 0)  # Gold for corners
                 radius = 6
                 border_color = (255, 255, 255)
+                border_thickness = 2
+            elif 'Net' in point_name:
+                color = (255, 20, 147)  # Deep pink for net
+                radius = 5
+                border_color = (255, 255, 255)
+                border_thickness = 2
             else:
-                color = (255, 150, 0)  # Orange for others
+                color = (255, 140, 0)  # Dark orange for others
                 radius = 4
                 border_color = (200, 200, 200)
+                border_thickness = 1
 
-            # Draw point with border
-            cv2.circle(frame_display, (x, y), radius + 2, border_color, -1)
+            # Draw point with clean border
+            cv2.circle(frame_display, (x, y), radius + border_thickness, border_color, -1)
             cv2.circle(frame_display, (x, y), radius, color, -1)
 
-            # Labels
+            # Clean labels with background
             if show_labels:
-                cv2.putText(frame_display, point_name, (x + 12, y + 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.5
+                text_thickness = 1
+
+                text_size = cv2.getTextSize(point_name, font, font_scale, text_thickness)[0]
+
+                # Background rectangle for readability
+                bg_x1, bg_y1 = x + 10, y - text_size[1] - 4
+                bg_x2, bg_y2 = x + 14 + text_size[0], y + 4
+
+                cv2.rectangle(frame_display, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                cv2.rectangle(frame_display, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
+
+                cv2.putText(frame_display, point_name, (x + 12, y),
+                            font, font_scale, (255, 255, 255), text_thickness)
 
     return frame_display
 
 def draw_court_polygon(frame: np.ndarray, corner_points: np.ndarray) -> np.ndarray:
-    """Draw court polygon overlay"""
+    """Draw court polygon overlay with professional styling"""
     if len(corner_points) >= 4:
         pts = corner_points.reshape((-1, 1, 2)).astype(np.int32)
 
-        # Semi-transparent overlay
+        # Very subtle overlay
         overlay = frame.copy()
-        cv2.fillPoly(overlay, [pts], (0, 255, 0))
-        cv2.addWeighted(frame, 0.92, overlay, 0.08, 0, frame)
+        cv2.fillPoly(overlay, [pts], (0, 1, 14))  # Lime green
+        cv2.addWeighted(frame, 0.95, overlay, 0.05, 0, frame)
 
-        # Border
-        cv2.polylines(frame, [pts], True, (0, 255, 0), 4)
+        # Clean border
+        cv2.polylines(frame, [pts], True, (255, 255, 255), 3)
 
     return frame
 
 def process_stage1_batch(args):
-    """Process batch for Stage 1: Court detection"""
+    """Process batch for Stage 1: Court detection with professional styling"""
     batch_frames, court_points, corner_points = args
     processed_frames = []
 
@@ -315,20 +377,35 @@ def process_stage1_batch(args):
         frame_display = draw_court_points(frame, court_points)
         frame_display = draw_court_polygon(frame_display, corner_points)
 
-        # Frame info
-        cv2.rectangle(frame_display, (0, 0), (400, 60), (0, 0, 0), -1)
-        cv2.rectangle(frame_display, (0, 0), (400, 60), (0, 255, 0), 2)
-        cv2.putText(frame_display, f"COURT DETECTION - Frame: {frame_idx}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame_display, f"Points: {len(court_points)}", (10, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # Professional frame info overlay
+        overlay_height = 70
+        overlay = np.zeros((overlay_height, frame.shape[1], 3), dtype=np.uint8)
 
-        processed_frames.append((frame_idx, frame_display))
+        # Gradient background
+        for i in range(overlay_height):
+            alpha = i / overlay_height
+            overlay[i, :] = (int(30 * alpha), int(50 * alpha), int(30 * alpha))
+
+        # Border
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1]-1, overlay_height-1), (255, 255, 255), 2)
+
+        # Text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay, f"COURT DETECTION", (15, 25),
+                    font, 0.8, (255, 255, 255), 2)
+        cv2.putText(overlay, f"Frame: {frame_idx:06d} | Points: {len(court_points)}", (15, 50),
+                    font, 0.5, (220, 220, 220), 1)
+
+        # Blend overlay
+        result = frame_display.copy()
+        result[:overlay_height] = cv2.addWeighted(result[:overlay_height], 0.7, overlay, 0.3, 0)
+
+        processed_frames.append((frame_idx, result))
 
     return processed_frames
 
 def process_stage2_batch(args):
-    """Process batch for Stage 2: Pose estimation"""
+    """Process batch for Stage 2: Pose estimation with professional styling"""
     batch_frames, poses_by_frame, court_points, pose_edges, colors = args
     processed_frames = []
 
@@ -343,7 +420,7 @@ def process_stage2_batch(args):
             joints = pose["joints"]
             color = colors[human_idx % len(colors)]
 
-            # Draw joints
+            # Draw joints with better styling
             joint_positions = {}
             for joint in joints:
                 if joint["confidence"] > 0.5:
@@ -351,39 +428,69 @@ def process_stage2_batch(args):
                     x, y = int(joint["x"]), int(joint["y"])
 
                     if joint.get("in_court", False):
+                        # Prominent joint in court
+                        cv2.circle(frame_display, (x, y), 8, (255, 255, 255), -1)
                         cv2.circle(frame_display, (x, y), 6, color, -1)
-                        cv2.circle(frame_display, (x, y), 8, (255, 255, 255), 1)
                         total_joints_in_court += 1
                     else:
-                        cv2.circle(frame_display, (x, y), 3, (128, 128, 128), -1)
+                        # Subtle joint outside court
+                        cv2.circle(frame_display, (x, y), 4, (150, 150, 150), -1)
+                        cv2.circle(frame_display, (x, y), 2, (100, 100, 100), -1)
 
                     joint_positions[joint_idx] = (x, y)
 
-            # Draw skeleton
+            # Draw skeleton with better styling
             for edge in pose_edges:
                 if edge[0] in joint_positions and edge[1] in joint_positions:
-                    cv2.line(frame_display, joint_positions[edge[0]], joint_positions[edge[1]], color, 3)
+                    cv2.line(frame_display, joint_positions[edge[0]], joint_positions[edge[1]], color, 2)
 
-            # Player label
+            # Clean player label
             if joint_positions:
                 head_pos = joint_positions.get(0, list(joint_positions.values())[0])
-                cv2.putText(frame_display, f"Player {human_idx}", (head_pos[0] - 25, head_pos[1] - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # Frame info
-        cv2.rectangle(frame_display, (0, 0), (500, 80), (0, 0, 0), -1)
-        cv2.rectangle(frame_display, (0, 0), (500, 80), (255, 100, 0), 2)
-        cv2.putText(frame_display, f"POSE ESTIMATION - Frame: {frame_idx}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame_display, f"Players: {len(frame_poses)} | Court Joints: {total_joints_in_court}", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                # Background for label
+                label_text = f"P{human_idx}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                text_size = cv2.getTextSize(label_text, font, 0.6, 2)[0]
 
-        processed_frames.append((frame_idx, frame_display))
+                bg_x1 = head_pos[0] - 5
+                bg_y1 = head_pos[1] - text_size[1] - 10
+                bg_x2 = head_pos[0] + text_size[0] + 5
+                bg_y2 = head_pos[1] - 5
+
+                cv2.rectangle(frame_display, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                cv2.rectangle(frame_display, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 2)
+
+                cv2.putText(frame_display, label_text, (head_pos[0], head_pos[1] - 8),
+                            font, 0.6, (255, 255, 255), 2)
+
+        # Professional info overlay
+        overlay_height = 80
+        overlay = np.zeros((overlay_height, frame.shape[1], 3), dtype=np.uint8)
+
+        # Gradient background
+        for i in range(overlay_height):
+            alpha = i / overlay_height
+            overlay[i, :] = (int(50 * alpha), int(30 * alpha), int(70 * alpha))
+
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1]-1, overlay_height-1), (255, 100, 0), 2)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay, f"POSE ESTIMATION", (15, 30),
+                    font, 0.8, (255, 255, 255), 2)
+        cv2.putText(overlay, f"Frame: {frame_idx:06d} | Players: {len(frame_poses)} | Court Joints: {total_joints_in_court}",
+                    (15, 60), font, 0.5, (220, 220, 220), 1)
+
+        # Blend overlay
+        result = frame_display.copy()
+        result[:overlay_height] = cv2.addWeighted(result[:overlay_height], 0.7, overlay, 0.3, 0)
+
+        processed_frames.append((frame_idx, result))
 
     return processed_frames
 
 def process_stage3_batch(args):
-    """Process batch for Stage 3: Position tracking"""
+    """Process batch for Stage 3: Position tracking with professional styling"""
     (batch_frames, frame_data_dict, court_template, processor, out_h, out_w) = args
     processed_frames = []
 
@@ -391,11 +498,16 @@ def process_stage3_batch(args):
         frame_display = frame.copy()
         court_img = court_template.copy()
 
-        # Frame info header
-        cv2.rectangle(frame_display, (0, 0), (480, 60), (0, 0, 0), -1)
-        cv2.rectangle(frame_display, (0, 0), (480, 60), (100, 150, 255), 2)
-        cv2.putText(frame_display, f"POSITION TRACKING - Frame: {frame_idx}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+        # Professional frame info header
+        overlay_height = 70
+        overlay = np.zeros((overlay_height, frame.shape[1], 3), dtype=np.uint8)
+
+        # Gradient
+        for i in range(overlay_height):
+            alpha = i / overlay_height
+            overlay[i, :] = (int(100 * alpha), int(40 * alpha), int(150 * alpha))
+
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1]-1, overlay_height-1), (100, 150, 255), 2)
 
         # Get frame data
         frame_key = str(frame_idx)
@@ -404,9 +516,8 @@ def process_stage3_batch(args):
         total_ankles = 0
         active_players = len(frame_players)
 
-        # Process players in frame-organized format
+        # Process players with professional styling
         for player_key, player_data in frame_players.items():
-            # Extract player ID
             if player_key.startswith('player_'):
                 player_id = int(player_key.split('_')[1])
             else:
@@ -418,7 +529,7 @@ def process_stage3_batch(args):
             ankles = player_data.get('ankles', [])
             center_pos = player_data.get('center_position', {})
 
-            # Draw ankle positions
+            # Draw ankle positions with professional styling
             left_ankle_pos = None
             right_ankle_pos = None
 
@@ -428,52 +539,64 @@ def process_stage3_batch(args):
                 world_y = ankle_data['world_y']
                 confidence = ankle_data['joint_confidence']
 
-                # Skip invalid positions
                 if world_x == 0.0 and world_y == 0.0:
                     continue
 
                 px, py = processor.world_to_court(world_x, world_y)
                 total_ankles += 1
 
-                # Color based on ankle side
+                # Professional ankle styling
                 if ankle_side == 'left':
-                    ankle_color = (0, 220, 255)  # Cyan
+                    ankle_color = (255, 193, 7)  # Amber
                     left_ankle_pos = (px, py)
                 else:
-                    ankle_color = (255, 200, 0)  # Yellow
+                    ankle_color = (33, 150, 243)  # Blue
                     right_ankle_pos = (px, py)
 
-                # Draw ankle
-                radius = max(5, int(7 * confidence))
-                cv2.circle(court_img, (px, py), radius + 2, (255, 255, 255), -1)
+                # Draw ankle with confidence-based sizing
+                radius = max(4, int(6 * confidence))
+                cv2.circle(court_img, (px, py), radius + 3, (255, 255, 255), -1)
                 cv2.circle(court_img, (px, py), radius, ankle_color, -1)
 
-                # Label
-                cv2.putText(court_img, f"P{player_id}{ankle_side[0].upper()}", (px + 8, py - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, ankle_color, 1)
+                # Clean label
+                label = f"P{player_id}{ankle_side[0].upper()}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                cv2.putText(court_img, label, (px + 10, py - 5),
+                            font, 0.4, (255, 255, 255), 1)
 
-            # Connect ankles
+            # Connect ankles with styled line
             if left_ankle_pos and right_ankle_pos:
-                cv2.line(court_img, left_ankle_pos, right_ankle_pos, color, 2)
+                cv2.line(court_img, left_ankle_pos, right_ankle_pos, color, 3)
 
-            # Draw center position
+            # Draw center position professionally
             if 'x' in center_pos and 'y' in center_pos:
                 if not (center_pos['x'] == 0.0 and center_pos['y'] == 0.0):
                     center_px, center_py = processor.world_to_court(center_pos['x'], center_pos['y'])
-                    cv2.circle(court_img, (center_px, center_py), 6, color, 2)
-                    cv2.circle(court_img, (center_px, center_py), 2, (255, 255, 255), -1)
-                    cv2.putText(court_img, f"P{player_id}", (center_px + 10, center_py + 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        # Add info panel
-        info_text = f"Players: {active_players} | Ankles: {total_ankles}"
+                    # Center marker
+                    cv2.circle(court_img, (center_px, center_py), 10, (255, 255, 255), -1)
+                    cv2.circle(court_img, (center_px, center_py), 8, color, -1)
+                    cv2.circle(court_img, (center_px, center_py), 3, (255, 255, 255), -1)
+
+                    # Player label
+                    cv2.putText(court_img, f"P{player_id}", (center_px + 12, center_py + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+        # Add professional info panel
+        info_text = f"Players: {active_players} | Ankle Detections: {total_ankles}"
         court_img = processor.add_info_panel(court_img, frame_idx, info_text)
 
-        # Update frame info
-        cv2.putText(frame_display, f"Players: {active_players} | Ankles: {total_ankles}", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # Frame overlay text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay, f"POSITION TRACKING", (15, 25),
+                    font, 0.8, (255, 255, 255), 2)
+        cv2.putText(overlay, f"Frame: {frame_idx:06d} | {info_text}", (15, 55),
+                    font, 0.5, (220, 220, 220), 1)
 
-        # Combine frames
+        # Blend overlay
+        frame_display[:overlay_height] = cv2.addWeighted(frame_display[:overlay_height], 0.7, overlay, 0.3, 0)
+
+        # Combine frames professionally
         combined = np.zeros((out_h, out_w, 3), dtype=np.uint8)
         h, w = frame.shape[:2]
         combined[:h, :w] = frame_display
@@ -484,7 +607,7 @@ def process_stage3_batch(args):
     return processed_frames
 
 def process_stage4_batch(args):
-    """Process batch for Stage 4: Corrected positions comparison"""
+    """Process batch for Stage 4: Corrected positions comparison with professional styling"""
     (batch_frames, corrected_data, original_data, court_template, processor, out_h, out_w, trajectory_history) = args
     processed_frames = []
 
@@ -492,11 +615,16 @@ def process_stage4_batch(args):
         frame_display = frame.copy()
         court_img = court_template.copy()
 
-        # Frame info
-        cv2.rectangle(frame_display, (0, 0), (550, 60), (0, 0, 0), -1)
-        cv2.rectangle(frame_display, (0, 0), (550, 60), (255, 0, 150), 2)
-        cv2.putText(frame_display, f"CORRECTION COMPARISON - Frame: {frame_idx}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Professional frame info
+        overlay_height = 70
+        overlay = np.zeros((overlay_height, frame.shape[1], 3), dtype=np.uint8)
+
+        # Gradient background
+        for i in range(overlay_height):
+            alpha = i / overlay_height
+            overlay[i, :] = (int(150 * alpha), int(30 * alpha), int(100 * alpha))
+
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1]-1, overlay_height-1), (255, 0, 150), 2)
 
         corrections_in_frame = 0
         total_displacement = 0.0
@@ -511,7 +639,7 @@ def process_stage4_batch(args):
             corrected_frame_data = corrected_data['frame_data'].get(frame_key, {})
             original_frame_data = original_data['frame_data'].get(frame_key, {})
 
-            # Process frame-organized data
+            # Process frame-organized data with professional styling
             for player_key, corrected_player_data in corrected_frame_data.items():
                 if not player_key.startswith('player_'):
                     continue
@@ -554,72 +682,112 @@ def process_stage4_batch(args):
                         if len(trajectory_history[player_id][traj_type]) > 50:
                             trajectory_history[player_id][traj_type] = trajectory_history[player_id][traj_type][-50:]
 
-                    # Draw positions
+                    # Draw positions with professional styling
                     # Original position (subtle)
                     if displacement > 0.01:
-                        cv2.circle(court_img, (orig_px, orig_py), 4, (120, 120, 120), -1)
-                        cv2.line(court_img, (orig_px, orig_py), (corr_px, corr_py), (150, 150, 120), 2)
+                        cv2.circle(court_img, (orig_px, orig_py), 6, (150, 150, 150), -1)
+                        cv2.circle(court_img, (orig_px, orig_py), 4, (100, 100, 100), -1)
+
+                        # Correction vector
+                        cv2.arrowedLine(court_img, (orig_px, orig_py), (corr_px, corr_py),
+                                        (200, 200, 100), 2, tipLength=0.3)
 
                     # Corrected position (prominent)
-                    cv2.circle(court_img, (corr_px, corr_py), 8, (255, 255, 255), -1)
-                    cv2.circle(court_img, (corr_px, corr_py), 6, color, -1)
-                    cv2.putText(court_img, f"P{player_id}", (corr_px + 10, corr_py + 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    cv2.circle(court_img, (corr_px, corr_py), 12, (255, 255, 255), -1)
+                    cv2.circle(court_img, (corr_px, corr_py), 10, color, -1)
+                    cv2.circle(court_img, (corr_px, corr_py), 4, (255, 255, 255), -1)
 
-        # Draw trajectories
+                    # Player label with background
+                    label = f"P{player_id}"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    text_size = cv2.getTextSize(label, font, 0.5, 2)[0]
+
+                    bg_x1 = corr_px + 15
+                    bg_y1 = corr_py - text_size[1] - 5
+                    bg_x2 = corr_px + 20 + text_size[0]
+                    bg_y2 = corr_py + 5
+
+                    cv2.rectangle(court_img, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                    cv2.rectangle(court_img, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
+
+                    cv2.putText(court_img, label, (corr_px + 17, corr_py),
+                                font, 0.5, (255, 255, 255), 2)
+
+        # Draw trajectories with professional styling
         for player_id, trajectories in trajectory_history.items():
             color = processor.get_color(player_id)
 
-            # Draw original trajectory (subtle)
+            # Draw original trajectory (subtle, dashed effect)
             original_traj = trajectories.get('original', [])[-30:]
             if len(original_traj) > 1:
                 for i in range(1, len(original_traj)):
                     alpha = i / len(original_traj)
-                    if alpha > 0.3:
-                        cv2.line(court_img, original_traj[i-1], original_traj[i], (80, 80, 80), 1)
+                    if alpha > 0.3 and i % 2 == 0:  # Dashed effect
+                        line_color = tuple(int(c * 0.4) for c in color)
+                        cv2.line(court_img, original_traj[i-1], original_traj[i], line_color, 1)
 
-            # Draw corrected trajectory (prominent)
+            # Draw corrected trajectory (prominent, smooth)
             corrected_traj = trajectories.get('corrected', [])[-30:]
             if len(corrected_traj) > 1:
                 for i in range(1, len(corrected_traj)):
                     alpha = i / len(corrected_traj)
                     if alpha > 0.4:
-                        thickness = max(1, int(2 * alpha))
-                        subtle_color = tuple(int(c * 0.7) for c in color)
-                        cv2.line(court_img, corrected_traj[i-1], corrected_traj[i], subtle_color, thickness)
+                        thickness = max(1, int(3 * alpha))
+                        line_alpha = min(1.0, alpha + 0.3)
+                        line_color = tuple(int(c * line_alpha) for c in color)
+                        cv2.line(court_img, corrected_traj[i-1], corrected_traj[i], line_color, thickness)
 
-        # Correction indicator
+        # Professional correction indicator
         if corrections_in_frame > 0:
-            cv2.rectangle(frame_display, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (200, 200, 100), 2)
-            cv2.circle(frame_display, (frame.shape[1]-30, 30), 8, (200, 200, 100), -1)
-            cv2.putText(frame_display, f"{corrections_in_frame}", (frame.shape[1]-35, 35),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+            # Frame border
+            cv2.rectangle(frame_display, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (255, 215, 0), 3)
 
-        # Legend
+            # Correction badge
+            badge_size = 20
+            badge_center = (frame.shape[1] - 40, 40)
+            cv2.circle(frame_display, badge_center, badge_size, (255, 215, 0), -1)
+            cv2.circle(frame_display, badge_center, badge_size, (255, 255, 255), 2)
+            cv2.putText(frame_display, f"{corrections_in_frame}",
+                        (badge_center[0] - 8, badge_center[1] + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+        # Professional legend
         if corrections_in_frame > 0:
-            legend_x = court_img.shape[1] - 180
-            legend_y = court_img.shape[0] - 80
+            legend_x = court_img.shape[1] - 200
+            legend_y = court_img.shape[0] - 100
 
-            cv2.rectangle(court_img, (legend_x - 5, legend_y - 15),
-                          (court_img.shape[1] - 5, legend_y + 35), (0, 0, 0), -1)
-            cv2.rectangle(court_img, (legend_x - 5, legend_y - 15),
-                          (court_img.shape[1] - 5, legend_y + 35), (60, 60, 60), 1)
+            # Legend background
+            cv2.rectangle(court_img, (legend_x - 10, legend_y - 25),
+                          (court_img.shape[1] - 10, legend_y + 45), (0, 0, 0), -1)
+            cv2.rectangle(court_img, (legend_x - 10, legend_y - 25),
+                          (court_img.shape[1] - 10, legend_y + 45), (255, 255, 255), 2)
 
-            cv2.circle(court_img, (legend_x + 8, legend_y), 3, (100, 255, 100), -1)
-            cv2.putText(court_img, "Corrected", (legend_x + 18, legend_y + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+            # Legend title
+            cv2.putText(court_img, "LEGEND", (legend_x - 5, legend_y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-            cv2.circle(court_img, (legend_x + 8, legend_y + 15), 2, (120, 120, 120), -1)
-            cv2.putText(court_img, "Original", (legend_x + 18, legend_y + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1)
+            # Legend items
+            cv2.circle(court_img, (legend_x + 8, legend_y + 5), 5, (100, 255, 100), -1)
+            cv2.putText(court_img, "Corrected", (legend_x + 20, legend_y + 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+
+            cv2.circle(court_img, (legend_x + 8, legend_y + 25), 3, (120, 120, 120), -1)
+            cv2.putText(court_img, "Original", (legend_x + 20, legend_y + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
 
         # Info panel
-        info_text = f"Corrections: {corrections_in_frame}"
+        info_text = f"Corrections: {corrections_in_frame} | Avg Displacement: {total_displacement/max(1,corrections_in_frame):.3f}m"
         court_img = processor.add_info_panel(court_img, frame_idx, info_text)
 
-        # Update frame info
-        cv2.putText(frame_display, f"Corrections: {corrections_in_frame}", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # Frame overlay text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay, f"CORRECTION ANALYSIS", (15, 25),
+                    font, 0.8, (255, 255, 255), 2)
+        cv2.putText(overlay, f"Frame: {frame_idx:06d} | Corrections: {corrections_in_frame}", (15, 55),
+                    font, 0.5, (220, 220, 220), 1)
+
+        # Blend overlay
+        frame_display[:overlay_height] = cv2.addWeighted(frame_display[:overlay_height], 0.7, overlay, 0.3, 0)
 
         # Combine frames
         combined = np.zeros((out_h, out_w, 3), dtype=np.uint8)
@@ -631,9 +799,9 @@ def process_stage4_batch(args):
 
     return processed_frames
 
-# Main visualization functions
+# Main visualization functions with enhanced professional styling
 def visualize_stage1(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 1: Court detection visualization"""
+    """Stage 1: Court detection visualization with professional styling"""
     logging.info("Creating Stage 1 visualization: Court detection")
 
     processor = VideoProcessor(video_path, num_threads)
@@ -674,7 +842,7 @@ def visualize_stage1(video_path: str, data_path: str, output_path: str, num_thre
     logging.info(f"✓ Stage 1 visualization saved to {output_path}")
 
 def visualize_stage2(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 2: Pose estimation visualization"""
+    """Stage 2: Pose estimation visualization with professional styling"""
     logging.info("Creating Stage 2 visualization: Pose estimation")
 
     processor = VideoProcessor(video_path, num_threads)
@@ -724,7 +892,7 @@ def visualize_stage2(video_path: str, data_path: str, output_path: str, num_thre
     logging.info(f"✓ Stage 2 visualization saved to {output_path}")
 
 def visualize_stage3(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 3: Position tracking visualization"""
+    """Stage 3: Position tracking visualization with professional styling"""
     logging.info("Creating Stage 3 visualization: Position tracking")
 
     processor = VideoProcessor(video_path, num_threads)
@@ -795,7 +963,7 @@ def visualize_stage3(video_path: str, data_path: str, output_path: str, num_thre
         logging.warning("No position tracking data found")
 
 def visualize_stage4(video_path: str, data_path: str, output_path: str, num_threads: int = None):
-    """Stage 4: Corrected positions comparison visualization"""
+    """Stage 4: Corrected positions comparison visualization with professional styling"""
     logging.info("Creating Stage 4 visualization: Corrected positions comparison")
 
     processor = VideoProcessor(video_path, num_threads)
@@ -860,7 +1028,7 @@ def visualize_stage4(video_path: str, data_path: str, output_path: str, num_thre
     logging.info(f"✓ Stage 4 visualization saved to {output_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced visualization for complete badminton analysis pipeline")
+    parser = argparse.ArgumentParser(description="Enhanced professional visualization for complete badminton analysis pipeline")
     parser.add_argument("video_path", type=str, help="Path to input video")
     parser.add_argument("--stage", type=int, required=True, choices=[1, 2, 3, 4],
                         help="Stage to visualize (1=court, 2=pose, 3=positions, 4=corrected)")
@@ -924,7 +1092,7 @@ def main():
         total_time = end_time - start_time
         final_memory = psutil.virtual_memory().percent
 
-        logging.info(f"✓ Visualization complete!")
+        logging.info(f"✓ Professional visualization complete!")
         logging.info(f"✓ Output: {args.output}")
         logging.info(f"✓ Processing time: {total_time:.2f} seconds")
         logging.info(f"✓ Memory usage: {initial_memory}% → {final_memory}%")
