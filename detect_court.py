@@ -302,7 +302,7 @@ def main():
     parser.add_argument('--iterations', type=int, default=500, help='RANSAC iterations')
     args = parser.parse_args()
 
-    print("Badminton Camera Calibration Research Script")
+    print("Badminton Camera Calibration Script")
     print("=" * 50)
 
     video_name = os.path.splitext(os.path.basename(args.video))[0]
