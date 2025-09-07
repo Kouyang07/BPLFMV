@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Video-Click Badminton Player Position Annotation Tool
+Video-Click Badminton Player Position Annotation Tool - Two Player Version
 
-GUI tool for annotating player positions by clicking directly on the video frame.
+GUI tool for annotating both player positions by clicking directly on the video frame.
 Converts pixel coordinates to world coordinates using homography from court detection.
-Focuses on annotating the closest player position for evaluation purposes.
+Supports annotating both Player 1 and Player 2 for evaluation purposes.
 
 Usage: python video_annotation_tool.py <video_file_path>
 
@@ -27,7 +27,7 @@ import time
 
 
 class VideoClickAnnotator:
-    """Annotation tool that converts video clicks to world coordinates."""
+    """Annotation tool that converts video clicks to world coordinates for both players."""
 
     # Court dimensions (meters)
     COURT_WIDTH = 6.1
@@ -38,8 +38,10 @@ class VideoClickAnnotator:
         self.video_path = Path(video_path)
         self.video_name = self.video_path.stem
 
-        # Results directory structure
-        self.results_dir = Path("results") / self.video_name
+        # Results directory structure - changed to current directory
+        self.results_dir = Path(self.video_name)  # Changed from Path("results") / self.video_name
+        self.results_dir.mkdir(exist_ok=True)  # Create directory if it doesn't exist
+
         self.pose_file = self.results_dir / "pose.json"
         self.annotation_file = self.results_dir / "video_click_annotations.json"
 
@@ -53,9 +55,10 @@ class VideoClickAnnotator:
         self.video_player = None
         self.init_video_player()
 
-        # Annotation data
-        self.annotations = {}  # frame_number -> (world_x, world_y)
+        # Annotation data - changed to support both players
+        self.annotations = {}  # frame_number -> {player_id: (world_x, world_y)}
         self.current_frame = 0
+        self.current_player = 1  # Currently selected player (1 or 2)
 
         # GUI elements
         self.root = None
@@ -66,6 +69,12 @@ class VideoClickAnnotator:
 
         # Auto-save
         self.auto_save_timer = None
+
+        # Player colors for visualization
+        self.player_colors = {
+            1: (255, 100, 100),  # Light red for Player 1
+            2: (100, 100, 255)   # Light blue for Player 2
+        }
 
     def load_court_data(self):
         """Load court points and calculate homography for coordinate transformation."""
@@ -168,7 +177,7 @@ class VideoClickAnnotator:
     def setup_gui(self):
         """Setup the main GUI."""
         self.root = tk.Tk()
-        self.root.title(f"Video Click Annotation - {self.video_name}")
+        self.root.title(f"Two-Player Video Annotation - {self.video_name}")
         self.root.geometry("1400x900")
         self.root.state('zoomed')  # Start maximized on Windows
 
@@ -189,8 +198,8 @@ class VideoClickAnnotator:
         left_panel.grid_rowconfigure(4, weight=0)  # Info fixed size
         left_panel.grid_columnconfigure(0, weight=1)
 
-        # Video title - compact
-        video_title = ttk.Label(left_panel, text="Click on video to mark closest player position",
+        # Video title - updated for two players
+        video_title = ttk.Label(left_panel, text="Click on video to mark player positions",
                                 font=('Arial', 11, 'bold'))
         video_title.grid(row=0, column=0, pady=(0, 5), sticky="ew")
 
@@ -224,7 +233,7 @@ class VideoClickAnnotator:
         controls_frame.grid(row=2, column=0, sticky="ew", pady=3)
         controls_frame.grid_columnconfigure(2, weight=1)
 
-        # Navigation buttons - make them actually work
+        # Navigation buttons
         btn_prev_10 = ttk.Button(controls_frame, text="◀◀", width=4)
         btn_prev_10.configure(command=self.prev_frame_10)
         btn_prev_10.grid(row=0, column=0, padx=2)
@@ -289,33 +298,55 @@ class VideoClickAnnotator:
         self.mouse_info_label = ttk.Label(status_frame, text="", font=('Arial', 9))
         self.mouse_info_label.grid(row=0, column=1, sticky="e")
 
-        # Right panel - Controls (compact, less space)
+        # Right panel - Controls
         right_panel = ttk.Frame(self.root)
         right_panel.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
 
+        # Player selection
+        player_frame = ttk.LabelFrame(right_panel, text="Player Selection")
+        player_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.player_var = tk.IntVar(value=1)
+        player1_radio = ttk.Radiobutton(player_frame, text="Player 1 (Red)",
+                                        variable=self.player_var, value=1,
+                                        command=self.on_player_change)
+        player1_radio.pack(anchor=tk.W, padx=5, pady=2)
+
+        player2_radio = ttk.Radiobutton(player_frame, text="Player 2 (Blue)",
+                                        variable=self.player_var, value=2,
+                                        command=self.on_player_change)
+        player2_radio.pack(anchor=tk.W, padx=5, pady=2)
+
         # Current annotation info
-        current_frame = ttk.LabelFrame(right_panel, text="Current Position")
+        current_frame = ttk.LabelFrame(right_panel, text="Current Positions")
         current_frame.pack(fill=tk.X, pady=(0, 5))
 
-        self.position_info_label = ttk.Label(current_frame, text="No position marked",
+        self.position_info_label = ttk.Label(current_frame, text="No positions marked",
                                              wraplength=280, justify=tk.LEFT, font=('Arial', 9))
         self.position_info_label.pack(pady=8)
 
-        # Court visualization (smaller)
+        # Court visualization
         court_frame = ttk.LabelFrame(right_panel, text="Court Reference")
         court_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.court_canvas = tk.Canvas(court_frame, width=160, height=220, bg='white')
         self.court_canvas.pack(pady=5)
 
-        # Controls - more compact
+        # Controls
         control_frame = ttk.LabelFrame(right_panel, text="Controls")
         control_frame.pack(fill=tk.X, pady=(0, 5))
 
-        # Clear button
-        btn_clear = ttk.Button(control_frame, text="Clear Current Position")
-        btn_clear.configure(command=self.clear_current_frame)
-        btn_clear.pack(fill=tk.X, pady=2)
+        # Clear buttons
+        clear_frame = ttk.Frame(control_frame)
+        clear_frame.pack(fill=tk.X, pady=2)
+
+        btn_clear_current = ttk.Button(clear_frame, text="Clear Current Player")
+        btn_clear_current.configure(command=self.clear_current_player)
+        btn_clear_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1))
+
+        btn_clear_all = ttk.Button(clear_frame, text="Clear All")
+        btn_clear_all.configure(command=self.clear_current_frame)
+        btn_clear_all.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0))
 
         # Navigation buttons
         nav_frame = ttk.Frame(control_frame)
@@ -352,12 +383,14 @@ class VideoClickAnnotator:
         btn_export.configure(command=self.export_for_evaluation)
         btn_export.pack(fill=tk.X, pady=1)
 
-        # Keyboard bindings - bind to canvas instead of root for better focus
+        # Keyboard bindings
         self.video_canvas.bind('<Left>', lambda e: self.prev_frame())
         self.video_canvas.bind('<Right>', lambda e: self.next_frame())
         self.video_canvas.bind('<Control-s>', lambda e: self.save_annotations())
-        self.video_canvas.bind('<Delete>', lambda e: self.clear_current_frame())
-        self.video_canvas.bind('<BackSpace>', lambda e: self.clear_current_frame())
+        self.video_canvas.bind('<Delete>', lambda e: self.clear_current_player())
+        self.video_canvas.bind('<BackSpace>', lambda e: self.clear_current_player())
+        self.video_canvas.bind('<1>', lambda e: self.set_current_player(1))
+        self.video_canvas.bind('<2>', lambda e: self.set_current_player(2))
 
         # Also bind to root for when other widgets have focus
         self.root.bind('<Control-s>', lambda e: self.save_annotations())
@@ -368,6 +401,17 @@ class VideoClickAnnotator:
 
         # Set initial focus to canvas
         self.root.after(100, lambda: self.video_canvas.focus_set())
+
+    def on_player_change(self):
+        """Handle player selection change."""
+        self.current_player = self.player_var.get()
+        self.update_display()
+
+    def set_current_player(self, player_id):
+        """Set current player via keyboard shortcut."""
+        self.player_var.set(player_id)
+        self.current_player = player_id
+        self.update_display()
 
     def on_video_click(self, event):
         """Handle clicks on the video canvas."""
@@ -381,18 +425,34 @@ class VideoClickAnnotator:
 
             # Check if the click is within the court bounds
             if 0 <= world_x <= self.COURT_WIDTH and 0 <= world_y <= self.COURT_LENGTH:
-                # Store annotation
-                self.annotations[self.current_frame] = (world_x, world_y)
+                # Initialize frame annotations if needed
+                if self.current_frame not in self.annotations:
+                    self.annotations[self.current_frame] = {}
 
-                print(f"Frame {self.current_frame}: Closest player at ({world_x:.2f}, {world_y:.2f})")
+                # Store annotation for current player
+                self.annotations[self.current_frame][self.current_player] = (world_x, world_y)
+
+                print(f"Frame {self.current_frame}: Player {self.current_player} at ({world_x:.2f}, {world_y:.2f})")
 
                 # Update displays
                 self.update_display()
 
-                # Auto-advance to next frame
-                if self.current_frame < self.total_frames - 1:
+                # Auto-advance to next frame if both players are annotated
+                frame_annotations = self.annotations.get(self.current_frame, {})
+                if len(frame_annotations) >= 2 and self.current_frame < self.total_frames - 1:
                     self.current_frame += 1
                     self.update_display()
+                # Or auto-advance if only annotating one player and that's done
+                elif self.current_player in frame_annotations and self.current_frame < self.total_frames - 1:
+                    # Switch to other player if not annotated, otherwise advance frame
+                    other_player = 2 if self.current_player == 1 else 1
+                    if other_player not in frame_annotations:
+                        self.player_var.set(other_player)
+                        self.current_player = other_player
+                        self.update_display()
+                    else:
+                        self.current_frame += 1
+                        self.update_display()
             else:
                 # Click outside court
                 messagebox.showwarning("Invalid Position",
@@ -412,12 +472,14 @@ class VideoClickAnnotator:
             world_x, world_y = self.pixel_to_world(canvas_x, canvas_y)
 
             if 0 <= world_x <= self.COURT_WIDTH and 0 <= world_y <= self.COURT_LENGTH:
-                self.mouse_info_label.config(text=f"Court: ({world_x:.2f}, {world_y:.2f})")
+                self.mouse_info_label.config(
+                    text=f"Court: ({world_x:.2f}, {world_y:.2f}) | Player {self.current_player}"
+                )
             else:
-                self.mouse_info_label.config(text="Outside court")
+                self.mouse_info_label.config(text=f"Outside court | Player {self.current_player}")
 
         except:
-            self.mouse_info_label.config(text="")
+            self.mouse_info_label.config(text=f"Player {self.current_player}")
 
     def on_frame_entry_change(self, event=None):
         """Handle real-time frame entry changes."""
@@ -462,19 +524,6 @@ class VideoClickAnnotator:
             # Fallback if canvas size not available
             self.set_scale(0.8)
 
-    def update_display_fast(self):
-        """Fast update for better responsiveness during annotation."""
-        if self.fast_update_mode:
-            # Only update video and essential info
-            self.update_video_display()
-            self.update_info_display()
-            # Update other displays less frequently
-            self.root.after_idle(self.update_court_display)
-            self.root.after_idle(self.update_statistics)
-        else:
-            # Full update
-            self.update_display()
-
     def update_display(self):
         """Update all displays."""
         self.update_video_display()
@@ -494,9 +543,8 @@ class VideoClickAnnotator:
         # Draw court overlay
         self.draw_court_overlay(frame_rgb)
 
-        # Draw annotation marker if exists
-        if self.current_frame in self.annotations:
-            self.draw_annotation_marker(frame_rgb)
+        # Draw annotation markers if they exist
+        self.draw_annotation_markers(frame_rgb)
 
         # Scale the frame
         height, width = frame_rgb.shape[:2]
@@ -541,32 +589,42 @@ class VideoClickAnnotator:
         except:
             pass  # Skip overlay if transformation fails
 
-    def draw_annotation_marker(self, frame):
-        """Draw marker for current annotation."""
+    def draw_annotation_markers(self, frame):
+        """Draw markers for all player annotations."""
         if self.current_frame not in self.annotations:
             return
 
-        try:
-            world_x, world_y = self.annotations[self.current_frame]
-            pixel_x, pixel_y = self.world_to_pixel(world_x, world_y)
+        frame_annotations = self.annotations[self.current_frame]
 
-            # Adjust for display scale
-            display_x = int(pixel_x / self.display_scale)
-            display_y = int(pixel_y / self.display_scale)
+        for player_id, (world_x, world_y) in frame_annotations.items():
+            try:
+                pixel_x, pixel_y = self.world_to_pixel(world_x, world_y)
 
-            # Draw crosshair marker
-            cv2.drawMarker(frame, (display_x, display_y), (255, 255, 0),
-                           cv2.MARKER_CROSS, 30, 3)
+                # Adjust for display scale
+                display_x = int(pixel_x / self.display_scale)
+                display_y = int(pixel_y / self.display_scale)
 
-            # Draw circle
-            cv2.circle(frame, (display_x, display_y), 15, (255, 255, 0), 2)
+                # Get player color
+                color = self.player_colors.get(player_id, (255, 255, 255))
 
-            # Add text label
-            cv2.putText(frame, "CLOSEST PLAYER", (display_x - 50, display_y - 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                # Draw crosshair marker
+                cv2.drawMarker(frame, (display_x, display_y), color,
+                               cv2.MARKER_CROSS, 30, 3)
 
-        except:
-            pass  # Skip marker if transformation fails
+                # Draw circle
+                cv2.circle(frame, (display_x, display_y), 15, color, 2)
+
+                # Add text label
+                label = f"P{player_id}"
+                cv2.putText(frame, label, (display_x - 10, display_y - 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                # Highlight current player
+                if player_id == self.current_player:
+                    cv2.circle(frame, (display_x, display_y), 25, color, 3)
+
+            except:
+                pass  # Skip marker if transformation fails
 
     def update_info_display(self):
         """Update frame and position information."""
@@ -574,18 +632,36 @@ class VideoClickAnnotator:
         timestamp = self.current_frame / self.fps if self.fps > 0 else 0
         self.frame_var.set(str(self.current_frame))
 
-        status = "✓ Annotated" if self.current_frame in self.annotations else "○ Not annotated"
+        frame_annotations = self.annotations.get(self.current_frame, {})
+        annotation_count = len(frame_annotations)
+
+        if annotation_count == 0:
+            status = "○ Not annotated"
+        elif annotation_count == 1:
+            status = "◐ Partially annotated"
+        else:
+            status = "✓ Fully annotated"
+
         self.frame_info_label.config(
             text=f"Frame {self.current_frame} / {self.total_frames - 1} | "
                  f"Time: {timestamp:.2f}s | {status}"
         )
 
         # Position info
-        if self.current_frame in self.annotations:
-            world_x, world_y = self.annotations[self.current_frame]
-            info_text = f"Frame {self.current_frame}:\nClosest player at ({world_x:.2f}, {world_y:.2f})"
+        if frame_annotations:
+            info_lines = [f"Frame {self.current_frame}:"]
+            for player_id in [1, 2]:
+                if player_id in frame_annotations:
+                    world_x, world_y = frame_annotations[player_id]
+                    marker = "▶ " if player_id == self.current_player else "  "
+                    info_lines.append(f"{marker}Player {player_id}: ({world_x:.2f}, {world_y:.2f})")
+                else:
+                    marker = "▶ " if player_id == self.current_player else "  "
+                    info_lines.append(f"{marker}Player {player_id}: Not marked")
+
+            info_text = "\n".join(info_lines)
         else:
-            info_text = f"Frame {self.current_frame}:\nNo position marked\n(Click on video to annotate)"
+            info_text = f"Frame {self.current_frame}:\nNo positions marked\n(Click on video to annotate Player {self.current_player})"
 
         self.position_info_label.config(text=info_text)
 
@@ -617,39 +693,82 @@ class VideoClickAnnotator:
         self.court_canvas.create_text(margin + court_width//2, net_y, text="NET",
                                       fill='white', font=('Arial', 7, 'bold'))
 
-        # Draw current annotation if exists
+        # Draw current annotations if they exist
         if self.current_frame in self.annotations:
-            world_x, world_y = self.annotations[self.current_frame]
+            frame_annotations = self.annotations[self.current_frame]
 
-            # Scale to mini court
-            court_x = margin + (world_x / self.COURT_WIDTH) * court_width
-            court_y = margin + (world_y / self.COURT_LENGTH) * court_height
+            for player_id, (world_x, world_y) in frame_annotations.items():
+                # Scale to mini court
+                court_x = margin + (world_x / self.COURT_WIDTH) * court_width
+                court_y = margin + (world_y / self.COURT_LENGTH) * court_height
 
-            # Draw player marker
-            self.court_canvas.create_oval(court_x-4, court_y-4, court_x+4, court_y+4,
-                                          fill='red', outline='darkred', width=2)
+                # Choose color
+                if player_id == 1:
+                    color = 'red'
+                    outline_color = 'darkred'
+                else:
+                    color = 'blue'
+                    outline_color = 'darkblue'
+
+                # Draw player marker
+                size = 6 if player_id == self.current_player else 4
+                self.court_canvas.create_oval(court_x-size, court_y-size, court_x+size, court_y+size,
+                                              fill=color, outline=outline_color, width=2)
+
+                # Add player number
+                self.court_canvas.create_text(court_x, court_y, text=str(player_id),
+                                              fill='white', font=('Arial', 6, 'bold'))
 
     def update_statistics(self):
         """Update statistics display."""
-        total_annotations = len(self.annotations)
-        coverage = (total_annotations / self.total_frames) * 100 if self.total_frames > 0 else 0
+        # Count annotations per player
+        player1_count = 0
+        player2_count = 0
+        both_players_count = 0
 
-        stats_text = f"Annotated frames: {total_annotations}\n"
+        for frame_annotations in self.annotations.values():
+            if 1 in frame_annotations:
+                player1_count += 1
+            if 2 in frame_annotations:
+                player2_count += 1
+            if 1 in frame_annotations and 2 in frame_annotations:
+                both_players_count += 1
+
+        total_annotated_frames = len(self.annotations)
+        coverage = (total_annotated_frames / self.total_frames) * 100 if self.total_frames > 0 else 0
+
+        stats_text = f"Annotated frames: {total_annotated_frames}\n"
+        stats_text += f"Player 1 annotations: {player1_count}\n"
+        stats_text += f"Player 2 annotations: {player2_count}\n"
+        stats_text += f"Both players: {both_players_count}\n"
         stats_text += f"Total frames: {self.total_frames}\n"
-        stats_text += f"Coverage: {coverage:.1f}%\n"
+        stats_text += f"Coverage: {coverage:.1f}%"
 
-        if total_annotations > 0:
+        if total_annotated_frames > 0:
             frames = sorted(self.annotations.keys())
-            stats_text += f"Range: {frames[0]} - {frames[-1]}"
+            stats_text += f"\nRange: {frames[0]} - {frames[-1]}"
 
         self.stats_label.config(text=stats_text)
 
+    def clear_current_player(self):
+        """Clear annotation for current player in current frame."""
+        if (self.current_frame in self.annotations and
+                self.current_player in self.annotations[self.current_frame]):
+            del self.annotations[self.current_frame][self.current_player]
+
+            # Remove frame entry if no players left
+            if not self.annotations[self.current_frame]:
+                del self.annotations[self.current_frame]
+
+            self.update_display()
+            print(f"Cleared Player {self.current_player} annotation for frame {self.current_frame}")
+
     def clear_current_frame(self):
-        """Clear annotation for current frame."""
+        """Clear all annotations for current frame."""
         if self.current_frame in self.annotations:
             del self.annotations[self.current_frame]
             self.update_display()
-            print(f"Cleared annotation for frame {self.current_frame}")
+            print(f"Cleared all annotations for frame {self.current_frame}")
 
     def goto_prev_annotation(self):
         """Go to previous annotated frame."""
@@ -704,6 +823,13 @@ class VideoClickAnnotator:
     def save_annotations(self):
         """Save annotations to file."""
         try:
+            # Convert annotations to serializable format
+            serializable_annotations = {}
+            for frame_num, frame_annotations in self.annotations.items():
+                serializable_annotations[str(frame_num)] = {
+                    str(player_id): list(position) for player_id, position in frame_annotations.items()
+                }
+
             save_data = {
                 'video_path': str(self.video_path),
                 'video_name': self.video_name,
@@ -718,11 +844,12 @@ class VideoClickAnnotator:
                     'length': self.COURT_LENGTH
                 },
                 'court_points': self.court_points,
-                'annotations': {str(k): v for k, v in self.annotations.items()},
+                'annotations': serializable_annotations,
                 'annotation_info': {
                     'total_annotated_frames': len(self.annotations),
-                    'annotation_method': 'video_click_with_homography',
-                    'coverage_percentage': (len(self.annotations) / self.total_frames) * 100
+                    'annotation_method': 'video_click_with_homography_two_players',
+                    'coverage_percentage': (len(self.annotations) / self.total_frames) * 100,
+                    'players_supported': [1, 2]
                 }
             }
 
@@ -730,7 +857,7 @@ class VideoClickAnnotator:
                 json.dump(save_data, f, indent=2)
 
             print(f"Annotations saved to: {self.annotation_file}")
-            messagebox.showinfo("Success", f"Saved {len(self.annotations)} annotations")
+            messagebox.showinfo("Success", f"Saved annotations for {len(self.annotations)} frames")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save annotations: {e}")
@@ -742,11 +869,19 @@ class VideoClickAnnotator:
                 with open(self.annotation_file, 'r') as f:
                     data = json.load(f)
 
-                # Convert string keys back to integers
+                # Convert string keys back to integers and tuples
                 annotations_data = data.get('annotations', {})
-                self.annotations = {int(k): tuple(v) for k, v in annotations_data.items()}
+                self.annotations = {}
 
-                print(f"Loaded {len(self.annotations)} existing annotations")
+                for frame_str, frame_data in annotations_data.items():
+                    frame_num = int(frame_str)
+                    self.annotations[frame_num] = {}
+
+                    for player_str, position_list in frame_data.items():
+                        player_id = int(player_str)
+                        self.annotations[frame_num][player_id] = tuple(position_list)
+
+                print(f"Loaded existing annotations for {len(self.annotations)} frames")
 
             except Exception as e:
                 print(f"Warning: Could not load existing annotations: {e}")
@@ -763,11 +898,23 @@ class VideoClickAnnotator:
                 with open(file_path, 'r') as f:
                     data = json.load(f)
 
+                # Convert loaded data
                 annotations_data = data.get('annotations', {})
-                self.annotations = {int(k): tuple(v) for k, v in annotations_data.items()}
+                self.annotations = {}
+
+                for frame_str, frame_data in annotations_data.items():
+                    frame_num = int(frame_str)
+                    self.annotations[frame_num] = {}
+
+                    if isinstance(frame_data, dict):  # New format with player IDs
+                        for player_str, position_list in frame_data.items():
+                            player_id = int(player_str)
+                            self.annotations[frame_num][player_id] = tuple(position_list)
+                    else:  # Old format - assume single player
+                        self.annotations[frame_num][1] = tuple(frame_data)
 
                 self.update_display()
-                messagebox.showinfo("Success", f"Loaded {len(self.annotations)} annotations")
+                messagebox.showinfo("Success", f"Loaded annotations for {len(self.annotations)} frames")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load annotations: {e}")
@@ -782,23 +929,28 @@ class VideoClickAnnotator:
             # Convert to evaluation format
             player_positions = []
 
-            for frame_index, (world_x, world_y) in self.annotations.items():
-                position_entry = {
-                    'frame_index': frame_index,
-                    'player_id': 0,  # Always 0 for closest player
-                    'hip_world_X': world_x,
-                    'hip_world_Y': world_y,
-                    'left_ankle_world_X': world_x,  # Same as hip for ground truth
-                    'left_ankle_world_Y': world_y,
-                    'right_ankle_world_X': world_x,
-                    'right_ankle_world_Y': world_y,
-                    'annotation_method': 'video_click_homography'
-                }
+            for frame_index, frame_annotations in self.annotations.items():
+                for player_id, (world_x, world_y) in frame_annotations.items():
+                    position_entry = {
+                        'frame_index': frame_index,
+                        'player_id': player_id,
+                        'hip_world_X': world_x,
+                        'hip_world_Y': world_y,
+                        'left_ankle_world_X': world_x,  # Same as hip for ground truth
+                        'left_ankle_world_Y': world_y,
+                        'right_ankle_world_X': world_x,
+                        'right_ankle_world_Y': world_y,
+                        'annotation_method': 'video_click_homography'
+                    }
 
-                player_positions.append(position_entry)
+                    player_positions.append(position_entry)
 
-            # Sort by frame
-            player_positions.sort(key=lambda x: x['frame_index'])
+            # Sort by frame and then by player
+            player_positions.sort(key=lambda x: (x['frame_index'], x['player_id']))
+
+            # Count statistics
+            player1_count = sum(1 for p in player_positions if p['player_id'] == 1)
+            player2_count = sum(1 for p in player_positions if p['player_id'] == 2)
 
             # Create export data
             export_data = {
@@ -816,12 +968,14 @@ class VideoClickAnnotator:
                 },
                 'court_points': self.court_points,
                 'player_positions': player_positions,
-                'annotation_method': 'video_click_with_homography_transformation',
+                'annotation_method': 'video_click_with_homography_transformation_two_players',
                 'annotation_info': {
                     'total_annotated_frames': len(self.annotations),
                     'total_positions': len(player_positions),
+                    'player1_positions': player1_count,
+                    'player2_positions': player2_count,
                     'annotation_coverage': len(self.annotations) / self.total_frames,
-                    'player_type': 'closest_to_camera',
+                    'players_supported': [1, 2],
                     'coordinate_transformation': 'homography_matrix'
                 }
             }
@@ -831,7 +985,11 @@ class VideoClickAnnotator:
             with open(export_file, 'w') as f:
                 json.dump(export_data, f, indent=2)
 
-            messagebox.showinfo("Success", f"Ground truth exported to:\n{export_file}")
+            messagebox.showinfo("Success",
+                                f"Ground truth exported to:\n{export_file}\n\n"
+                                f"Player 1: {player1_count} positions\n"
+                                f"Player 2: {player2_count} positions\n"
+                                f"Total: {len(player_positions)} positions")
             print(f"Exported {len(player_positions)} positions to: {export_file}")
 
         except Exception as e:
@@ -843,7 +1001,7 @@ class VideoClickAnnotator:
             if self.annotations:  # Only save if there are annotations
                 try:
                     self.save_annotations()
-                    print(f"Auto-saved {len(self.annotations)} annotations")
+                    print(f"Auto-saved annotations for {len(self.annotations)} frames")
                 except Exception as e:
                     print(f"Auto-save failed: {e}")
 
@@ -887,29 +1045,37 @@ def main():
     """Main function."""
     if len(sys.argv) != 2:
         print("Usage: python video_annotation_tool.py <video_file_path>")
-        print("\nVideo Click Badminton Annotation Tool")
-        print("=" * 50)
+        print("\nTwo-Player Video Click Badminton Annotation Tool")
+        print("=" * 60)
         print("Features:")
-        print("  ✓ Click directly on video to mark player positions")
+        print("  ✓ Click directly on video to mark both player positions")
         print("  ✓ Uses homography for accurate coordinate transformation")
         print("  ✓ Real-time court overlay with boundaries and net")
         print("  ✓ Zoom and pan controls for precise positioning")
-        print("  ✓ Auto-advance to next frame after annotation")
+        print("  ✓ Player selection (Player 1: Red, Player 2: Blue)")
+        print("  ✓ Auto-advance logic for efficient annotation")
         print("  ✓ Mouse coordinates shown in real-time")
-        print("  ✓ Visual markers and validation")
+        print("  ✓ Visual markers and validation for both players")
+        print("  ✓ Data stored in current directory: ./[video_name]/")
         print("\nRequirements:")
         print("  - Court detection must be run first (pose.json with court points)")
         print("  - Video file in supported format")
         print("\nControls:")
-        print("  - Click on video where closest player is positioned")
+        print("  - Select Player 1 or Player 2 with radio buttons")
+        print("  - Click on video where selected player is positioned")
         print("  - Use zoom slider or buttons to adjust view")
         print("  - Arrow keys or buttons to navigate frames")
-        print("  - Delete/Backspace to clear current annotation")
+        print("  - Delete/Backspace to clear current player annotation")
         print("  - Ctrl+S to save annotations")
         print("\nKeyboard Shortcuts:")
         print("  Left/Right arrows: Navigate frames")
-        print("  Delete/Backspace: Clear current annotation")
+        print("  1/2 keys: Switch to Player 1/2")
+        print("  Delete/Backspace: Clear current player annotation")
         print("  Ctrl+S: Save annotations")
+        print("\nAuto-advance Logic:")
+        print("  - After annotating a player, switches to other player if not annotated")
+        print("  - After both players annotated, advances to next frame")
+        print("  - Efficient workflow for full game annotation")
         sys.exit(1)
 
     video_path = sys.argv[1]
@@ -918,15 +1084,17 @@ def main():
         print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
 
-    print(f"Starting video click annotation tool for: {video_path}")
+    print(f"Starting two-player video click annotation tool for: {video_path}")
+    print(f"Data will be stored in: ./{Path(video_path).stem}/")
     print("\nInstructions:")
     print("1. The video will display with court boundary overlay (green lines)")
-    print("2. Click directly on the video where the closest player is positioned")
-    print("3. Use zoom controls if you need to see details more clearly")
-    print("4. The tool will auto-advance to the next frame after each annotation")
-    print("5. Mouse coordinates are shown in real-time in the bottom right")
-    print("6. Annotations are auto-saved every 60 seconds")
-    print("7. Export creates evaluation-ready ground truth data")
+    print("2. Select Player 1 (Red) or Player 2 (Blue) using radio buttons")
+    print("3. Click directly on the video where the selected player is positioned")
+    print("4. The tool will automatically switch players or advance frames")
+    print("5. Use zoom controls if you need to see details more clearly")
+    print("6. Mouse coordinates are shown in real-time in the bottom right")
+    print("7. Annotations are auto-saved every 60 seconds")
+    print("8. Export creates evaluation-ready ground truth data for both players")
 
     try:
         annotator = VideoClickAnnotator(video_path)
