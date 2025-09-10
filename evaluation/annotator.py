@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Video-Click Badminton Player Position Annotation Tool - Two Player Version
+Modified to work with the standard pipeline outputs
 
 GUI tool for annotating both player positions by clicking directly on the video frame.
 Converts pixel coordinates to world coordinates using homography from court detection.
@@ -19,7 +20,7 @@ import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageDraw, ImageFont
+from PIL import Image, ImageTk
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import threading
@@ -38,11 +39,19 @@ class VideoClickAnnotator:
         self.video_path = Path(video_path)
         self.video_name = self.video_path.stem
 
-        # Results directory structure - changed to current directory
-        self.results_dir = Path(self.video_name)  # Changed from Path("results") / self.video_name
-        self.results_dir.mkdir(exist_ok=True)  # Create directory if it doesn't exist
+        # Look for results in standard pipeline location first
+        self.results_dir = Path("results") / self.video_name
+        if not self.results_dir.exists():
+            # Fallback to current directory structure
+            self.results_dir = Path(self.video_name)
 
+        # Ensure results directory exists
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+
+        # File paths to match pipeline outputs
         self.pose_file = self.results_dir / "pose.json"
+        self.calibration_file = self.results_dir / "calibration.csv"
+        self.detections_file = self.results_dir / "detections.csv"
         self.annotation_file = self.results_dir / "video_click_annotations.json"
 
         # Load court detection data for coordinate transformation
@@ -55,7 +64,7 @@ class VideoClickAnnotator:
         self.video_player = None
         self.init_video_player()
 
-        # Annotation data - changed to support both players
+        # Annotation data - supports both players
         self.annotations = {}  # frame_number -> {player_id: (world_x, world_y)}
         self.current_frame = 0
         self.current_player = 1  # Currently selected player (1 or 2)
@@ -65,7 +74,6 @@ class VideoClickAnnotator:
         self.video_canvas = None
         self.video_image = None
         self.display_scale = 1.0
-        self.click_marker = None
 
         # Auto-save
         self.auto_save_timer = None
@@ -78,18 +86,14 @@ class VideoClickAnnotator:
 
     def load_court_data(self):
         """Load court points and calculate homography for coordinate transformation."""
-        if not self.pose_file.exists():
-            raise FileNotFoundError(f"Court detection file not found: {self.pose_file}")
-
-        with open(self.pose_file, 'r') as f:
-            data = json.load(f)
-
-        self.court_points = data.get('court_points', {})
-
-        # Check for required court points
-        required_points = ['P1', 'P2', 'P3', 'P4']
-        if not all(point in self.court_points for point in required_points):
-            raise ValueError(f"Missing required court points: {required_points}")
+        # Try to load from pose.json first (standard pipeline output)
+        if self.pose_file.exists():
+            self.load_from_pose_json()
+        # Fallback to separate files if pose.json doesn't exist
+        elif self.detections_file.exists():
+            self.load_from_detections_csv()
+        else:
+            raise FileNotFoundError(f"Court detection data not found. Expected: {self.pose_file} or {self.detections_file}")
 
         # Calculate homography matrix
         self.calculate_homography()
@@ -100,26 +104,123 @@ class VideoClickAnnotator:
         print("  P3: Lower baseline + RIGHT sideline")
         print("  P4: Upper baseline + RIGHT sideline")
 
+    def load_from_pose_json(self):
+        """Load court points from pose.json (standard pipeline output)."""
+        with open(self.pose_file, 'r') as f:
+            data = json.load(f)
+
+        # Try different possible locations for court points in pose.json
+        self.court_points = None
+
+        if 'court_points' in data:
+            self.court_points = data['court_points']
+        elif 'all_court_points' in data:
+            self.court_points = data['all_court_points']
+        elif 'enlarged_court_points' in data:
+            if 'court_points' in data:
+                self.court_points = data['court_points']
+            else:
+                self.court_points = data['enlarged_court_points']
+
+        if not self.court_points:
+            raise ValueError("No court points found in pose.json")
+
+        # Ensure we have the required corner points
+        required_points = ['P1', 'P2', 'P3', 'P4']
+        missing_points = [p for p in required_points if p not in self.court_points]
+
+        if missing_points:
+            # If we don't have P1-P4, try to extract them from available points
+            if len(self.court_points) >= 4:
+                print(f"Warning: Missing {missing_points}, using first 4 available points")
+                available_points = list(self.court_points.items())[:4]
+                self.court_points = {f'P{i+1}': coords for i, (_, coords) in enumerate(available_points)}
+            else:
+                raise ValueError(f"Missing required court points: {missing_points}")
+
+        print(f"Loaded court points from pose.json: {list(self.court_points.keys())}")
+
+    def load_from_detections_csv(self):
+        """Load court points from detections.csv (fallback method)."""
+        import csv
+
+        self.court_points = {}
+
+        with open(self.detections_file, 'r') as f:
+            first_line = f.readline().strip()
+            f.seek(0)
+
+            if 'Point' in first_line and 'X' in first_line:
+                # Header format
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        point_name = row['Point'].strip()
+                        x = float(row['X'])
+                        y = float(row['Y'])
+                        self.court_points[point_name] = [x, y]
+                    except (ValueError, KeyError):
+                        continue
+            else:
+                # No header format
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) >= 3:
+                        try:
+                            point_name = row[0].strip()
+                            x = float(row[1])
+                            y = float(row[2])
+                            self.court_points[point_name] = [x, y]
+                        except (ValueError, IndexError):
+                            continue
+
+        if not self.court_points:
+            raise ValueError("No court points loaded from detections.csv")
+
+        print(f"Loaded court points from detections.csv: {list(self.court_points.keys())}")
+
+    def normalize_point_coordinates(self, point_coords):
+        """Normalize point coordinates to consistent format [x, y]."""
+        if isinstance(point_coords, list) and len(point_coords) >= 2:
+            return [float(point_coords[0]), float(point_coords[1])]
+        elif isinstance(point_coords, dict):
+            if 'x' in point_coords and 'y' in point_coords:
+                return [float(point_coords['x']), float(point_coords['y'])]
+            elif 0 in point_coords and 1 in point_coords:
+                return [float(point_coords[0]), float(point_coords[1])]
+
+        raise ValueError(f"Invalid point coordinate format: {point_coords}")
+
     def calculate_homography(self):
         """Calculate homography matrix from video pixels to world coordinates."""
-        # Image points (pixels) from court detection
-        image_points = np.array([
-            self.court_points['P1'],  # Upper baseline + LEFT sideline
-            self.court_points['P2'],  # Lower baseline + LEFT sideline
-            self.court_points['P3'],  # Lower baseline + RIGHT sideline
-            self.court_points['P4']   # Upper baseline + RIGHT sideline
-        ], dtype=np.float32)
+        # Required corner points for homography
+        required_corners = ['P1', 'P2', 'P3', 'P4']
+
+        # Check if we have all required points
+        missing_corners = [corner for corner in required_corners if corner not in self.court_points]
+        if missing_corners:
+            raise ValueError(f"Missing required court corners: {missing_corners}")
+
+        # Extract image points (pixels) from court detection
+        image_points = []
+        for corner in required_corners:
+            coords = self.court_points[corner]
+            normalized_coords = self.normalize_point_coordinates(coords)
+            image_points.append(normalized_coords)
+
+        image_points = np.array(image_points, dtype=np.float32)
 
         # Corresponding world coordinates (meters)
         world_points = np.array([
-            [0, 0],                      # P1: Left side, top (0, 0)
-            [0, self.COURT_LENGTH],      # P2: Left side, bottom (0, 13.4)
-            [self.COURT_WIDTH, self.COURT_LENGTH],  # P3: Right side, bottom (6.1, 13.4)
-            [self.COURT_WIDTH, 0]        # P4: Right side, top (6.1, 0)
+            [0, 0],                      # P1: Left side, top
+            [0, self.COURT_LENGTH],      # P2: Left side, bottom
+            [self.COURT_WIDTH, self.COURT_LENGTH],  # P3: Right side, bottom
+            [self.COURT_WIDTH, 0]        # P4: Right side, top
         ], dtype=np.float32)
 
+        # Calculate homography matrix
         self.homography_matrix, _ = cv2.findHomography(
-            image_points, world_points, cv2.RANSAC
+            image_points, world_points, cv2.RANSAC, ransacReprojThreshold=5.0
         )
 
         if self.homography_matrix is None:
@@ -168,6 +269,12 @@ class VideoClickAnnotator:
 
         return float(display_x), float(display_y)
 
+    def world_to_pixel_original(self, world_x: float, world_y: float) -> Tuple[float, float]:
+        """Convert world coordinates to original video pixel coordinates (before scaling)."""
+        point = np.array([[world_x, world_y]], dtype=np.float32)
+        pixel_point = cv2.perspectiveTransform(point.reshape(1, 1, 2), self.inverse_homography)
+        return float(pixel_point[0][0][0]), float(pixel_point[0][0][1])
+
     def get_current_frame(self) -> Optional[np.ndarray]:
         """Get current video frame."""
         self.video_player.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
@@ -179,7 +286,10 @@ class VideoClickAnnotator:
         self.root = tk.Tk()
         self.root.title(f"Two-Player Video Annotation - {self.video_name}")
         self.root.geometry("1400x900")
-        self.root.state('zoomed')  # Start maximized on Windows
+        try:
+            self.root.state('zoomed')  # Start maximized on Windows
+        except:
+            pass  # Ignore if not available on this platform
 
         # Configure main grid - give video much more space
         self.root.grid_rowconfigure(0, weight=1)
@@ -198,12 +308,12 @@ class VideoClickAnnotator:
         left_panel.grid_rowconfigure(4, weight=0)  # Info fixed size
         left_panel.grid_columnconfigure(0, weight=1)
 
-        # Video title - updated for two players
+        # Video title
         video_title = ttk.Label(left_panel, text="Click on video to mark player positions",
                                 font=('Arial', 11, 'bold'))
         video_title.grid(row=0, column=0, pady=(0, 5), sticky="ew")
 
-        # Video canvas container - this gets most of the space
+        # Video canvas container
         video_container = ttk.Frame(left_panel)
         video_container.grid(row=1, column=0, sticky="nsew", pady=2)
         video_container.grid_rowconfigure(0, weight=1)
@@ -222,32 +332,28 @@ class VideoClickAnnotator:
         v_scrollbar.grid(row=0, column=1, sticky="ns")
         h_scrollbar.grid(row=1, column=0, sticky="ew")
 
-        # Bind events to canvas with better responsiveness
+        # Bind events to canvas
         self.video_canvas.bind('<Button-1>', self.on_video_click)
         self.video_canvas.bind('<Motion>', self.on_mouse_move)
         self.video_canvas.bind('<Enter>', lambda e: self.video_canvas.focus_set())
-        self.video_canvas.focus_set()  # Allow canvas to receive keyboard focus
+        self.video_canvas.focus_set()
 
-        # Video controls - compact layout
+        # Video controls
         controls_frame = ttk.Frame(left_panel)
         controls_frame.grid(row=2, column=0, sticky="ew", pady=3)
         controls_frame.grid_columnconfigure(2, weight=1)
 
         # Navigation buttons
-        btn_prev_10 = ttk.Button(controls_frame, text="◀◀", width=4)
-        btn_prev_10.configure(command=self.prev_frame_10)
+        btn_prev_10 = ttk.Button(controls_frame, text="◀◀", width=4, command=self.prev_frame_10)
         btn_prev_10.grid(row=0, column=0, padx=2)
 
-        btn_prev = ttk.Button(controls_frame, text="◀", width=4)
-        btn_prev.configure(command=self.prev_frame)
+        btn_prev = ttk.Button(controls_frame, text="◀", width=4, command=self.prev_frame)
         btn_prev.grid(row=0, column=1, padx=2)
 
-        btn_next = ttk.Button(controls_frame, text="▶", width=4)
-        btn_next.configure(command=self.next_frame)
+        btn_next = ttk.Button(controls_frame, text="▶", width=4, command=self.next_frame)
         btn_next.grid(row=0, column=3, padx=2)
 
-        btn_next_10 = ttk.Button(controls_frame, text="▶▶", width=4)
-        btn_next_10.configure(command=self.next_frame_10)
+        btn_next_10 = ttk.Button(controls_frame, text="▶▶", width=4, command=self.next_frame_10)
         btn_next_10.grid(row=0, column=4, padx=2)
 
         # Frame entry in center
@@ -263,11 +369,10 @@ class VideoClickAnnotator:
         frame_entry.bind('<Return>', self.goto_frame)
         frame_entry.bind('<KeyRelease>', self.on_frame_entry_change)
 
-        btn_go = ttk.Button(frame_controls, text="Go")
-        btn_go.configure(command=self.goto_frame)
+        btn_go = ttk.Button(frame_controls, text="Go", command=self.goto_frame)
         btn_go.grid(row=0, column=2, padx=2)
 
-        # Zoom controls - compact single row
+        # Zoom controls
         zoom_frame = ttk.Frame(left_panel)
         zoom_frame.grid(row=3, column=0, sticky="ew", pady=2)
         zoom_frame.grid_columnconfigure(1, weight=1)
@@ -279,15 +384,13 @@ class VideoClickAnnotator:
                                  orient=tk.HORIZONTAL, command=self.on_scale_change)
         scale_slider.grid(row=0, column=1, sticky="ew", padx=5)
 
-        btn_100 = ttk.Button(zoom_frame, text="100%", width=6)
-        btn_100.configure(command=lambda: self.set_scale(1.0))
+        btn_100 = ttk.Button(zoom_frame, text="100%", width=6, command=lambda: self.set_scale(1.0))
         btn_100.grid(row=0, column=2, padx=2)
 
-        btn_fit = ttk.Button(zoom_frame, text="Fit", width=6)
-        btn_fit.configure(command=self.fit_to_window)
+        btn_fit = ttk.Button(zoom_frame, text="Fit", width=6, command=self.fit_to_window)
         btn_fit.grid(row=0, column=3, padx=2)
 
-        # Status info - single compact row
+        # Status info
         status_frame = ttk.Frame(left_panel)
         status_frame.grid(row=4, column=0, sticky="ew", pady=2)
         status_frame.grid_columnconfigure(0, weight=1)
@@ -301,6 +404,22 @@ class VideoClickAnnotator:
         # Right panel - Controls
         right_panel = ttk.Frame(self.root)
         right_panel.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
+
+        # Data source info
+        info_frame = ttk.LabelFrame(right_panel, text="Data Sources")
+        info_frame.pack(fill=tk.X, pady=(0, 5))
+
+        # Display info about loaded data sources
+        source_info = f"Results dir: {self.results_dir}\n"
+        if self.pose_file.exists():
+            source_info += "✓ pose.json\n"
+        if self.calibration_file.exists():
+            source_info += "✓ calibration.csv\n"
+        if self.detections_file.exists():
+            source_info += "✓ detections.csv"
+
+        source_label = ttk.Label(info_frame, text=source_info, font=('Arial', 8))
+        source_label.pack(pady=3)
 
         # Player selection
         player_frame = ttk.LabelFrame(right_panel, text="Player Selection")
@@ -340,24 +459,20 @@ class VideoClickAnnotator:
         clear_frame = ttk.Frame(control_frame)
         clear_frame.pack(fill=tk.X, pady=2)
 
-        btn_clear_current = ttk.Button(clear_frame, text="Clear Current Player")
-        btn_clear_current.configure(command=self.clear_current_player)
+        btn_clear_current = ttk.Button(clear_frame, text="Clear Current Player", command=self.clear_current_player)
         btn_clear_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1))
 
-        btn_clear_all = ttk.Button(clear_frame, text="Clear All")
-        btn_clear_all.configure(command=self.clear_current_frame)
+        btn_clear_all = ttk.Button(clear_frame, text="Clear All", command=self.clear_current_frame)
         btn_clear_all.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0))
 
         # Navigation buttons
         nav_frame = ttk.Frame(control_frame)
         nav_frame.pack(fill=tk.X, pady=2)
 
-        btn_prev_ann = ttk.Button(nav_frame, text="← Previous")
-        btn_prev_ann.configure(command=self.goto_prev_annotation)
+        btn_prev_ann = ttk.Button(nav_frame, text="← Previous", command=self.goto_prev_annotation)
         btn_prev_ann.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1))
 
-        btn_next_ann = ttk.Button(nav_frame, text="Next →")
-        btn_next_ann.configure(command=self.goto_next_annotation)
+        btn_next_ann = ttk.Button(nav_frame, text="Next →", command=self.goto_next_annotation)
         btn_next_ann.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0))
 
         # Statistics
@@ -371,16 +486,13 @@ class VideoClickAnnotator:
         file_frame = ttk.LabelFrame(right_panel, text="File Operations")
         file_frame.pack(fill=tk.X, pady=(0, 5))
 
-        btn_save = ttk.Button(file_frame, text="💾 Save")
-        btn_save.configure(command=self.save_annotations)
+        btn_save = ttk.Button(file_frame, text="💾 Save", command=self.save_annotations)
         btn_save.pack(fill=tk.X, pady=1)
 
-        btn_load = ttk.Button(file_frame, text="📁 Load")
-        btn_load.configure(command=self.load_annotations_dialog)
+        btn_load = ttk.Button(file_frame, text="📁 Load", command=self.load_annotations_dialog)
         btn_load.pack(fill=tk.X, pady=1)
 
-        btn_export = ttk.Button(file_frame, text="📤 Export")
-        btn_export.configure(command=self.export_for_evaluation)
+        btn_export = ttk.Button(file_frame, text="📤 Export", command=self.export_for_evaluation)
         btn_export.pack(fill=tk.X, pady=1)
 
         # Keyboard bindings
@@ -399,8 +511,39 @@ class VideoClickAnnotator:
         self.load_existing_annotations()
         self.update_display()
 
+        # Test coordinate transformation
+        self.debug_coordinate_system()
+
         # Set initial focus to canvas
         self.root.after(100, lambda: self.video_canvas.focus_set())
+
+    def debug_coordinate_system(self):
+        """Debug the coordinate transformation system."""
+        print("\n=== COORDINATE SYSTEM DEBUG ===")
+        print(f"Court points loaded: {list(self.court_points.keys())}")
+
+        # Print actual court point coordinates
+        for corner in ['P1', 'P2', 'P3', 'P4']:
+            if corner in self.court_points:
+                coords = self.normalize_point_coordinates(self.court_points[corner])
+                print(f"{corner}: {coords}")
+
+        print(f"Homography matrix exists: {self.homography_matrix is not None}")
+        if self.homography_matrix is not None:
+            print(f"Homography matrix shape: {self.homography_matrix.shape}")
+
+        # Test transformation of corner points
+        print("\nTesting corner transformations:")
+        for corner in ['P1', 'P2', 'P3', 'P4']:
+            if corner in self.court_points:
+                coords = self.normalize_point_coordinates(self.court_points[corner])
+                try:
+                    world_x, world_y = self.pixel_to_world(coords[0] * self.display_scale, coords[1] * self.display_scale)
+                    print(f"{corner}: pixel {coords} -> world ({world_x:.2f}, {world_y:.2f})")
+                except Exception as e:
+                    print(f"{corner}: FAILED - {e}")
+
+        print("================================\n")
 
     def on_player_change(self):
         """Handle player selection change."""
@@ -415,16 +558,25 @@ class VideoClickAnnotator:
 
     def on_video_click(self, event):
         """Handle clicks on the video canvas."""
-        # Get click coordinates relative to the video image
+        # Get click coordinates relative to the canvas scroll region
         canvas_x = self.video_canvas.canvasx(event.x)
         canvas_y = self.video_canvas.canvasy(event.y)
 
         try:
-            # Convert to world coordinates
+            # Convert to world coordinates (accounting for display scaling)
             world_x, world_y = self.pixel_to_world(canvas_x, canvas_y)
 
-            # Check if the click is within the court bounds
-            if 0 <= world_x <= self.COURT_WIDTH and 0 <= world_y <= self.COURT_LENGTH:
+            print(f"Click at canvas ({canvas_x:.1f}, {canvas_y:.1f}) -> world ({world_x:.2f}, {world_y:.2f})")
+
+            # Check if the click is within the court bounds (with some tolerance)
+            margin = 0.5  # Allow clicks slightly outside court
+            if (-margin <= world_x <= self.COURT_WIDTH + margin and
+                    -margin <= world_y <= self.COURT_LENGTH + margin):
+
+                # Clamp coordinates to court bounds
+                world_x = max(0, min(self.COURT_WIDTH, world_x))
+                world_y = max(0, min(self.COURT_LENGTH, world_y))
+
                 # Initialize frame annotations if needed
                 if self.current_frame not in self.annotations:
                     self.annotations[self.current_frame] = {}
@@ -437,14 +589,12 @@ class VideoClickAnnotator:
                 # Update displays
                 self.update_display()
 
-                # Auto-advance to next frame if both players are annotated
+                # Auto-advance logic
                 frame_annotations = self.annotations.get(self.current_frame, {})
                 if len(frame_annotations) >= 2 and self.current_frame < self.total_frames - 1:
                     self.current_frame += 1
                     self.update_display()
-                # Or auto-advance if only annotating one player and that's done
                 elif self.current_player in frame_annotations and self.current_frame < self.total_frames - 1:
-                    # Switch to other player if not annotated, otherwise advance frame
                     other_player = 2 if self.current_player == 1 else 1
                     if other_player not in frame_annotations:
                         self.player_var.set(other_player)
@@ -461,6 +611,7 @@ class VideoClickAnnotator:
                                        f"Court bounds: (0, 0) to ({self.COURT_WIDTH}, {self.COURT_LENGTH})")
 
         except Exception as e:
+            print(f"Click conversion error: {e}")
             messagebox.showerror("Error", f"Failed to convert coordinates: {e}")
 
     def on_mouse_move(self, event):
@@ -476,10 +627,12 @@ class VideoClickAnnotator:
                     text=f"Court: ({world_x:.2f}, {world_y:.2f}) | Player {self.current_player}"
                 )
             else:
-                self.mouse_info_label.config(text=f"Outside court | Player {self.current_player}")
+                self.mouse_info_label.config(
+                    text=f"Outside: ({world_x:.2f}, {world_y:.2f}) | Player {self.current_player}"
+                )
 
-        except:
-            self.mouse_info_label.config(text=f"Player {self.current_player}")
+        except Exception as e:
+            self.mouse_info_label.config(text=f"Player {self.current_player} | Error: {e}")
 
     def on_frame_entry_change(self, event=None):
         """Handle real-time frame entry changes."""
@@ -506,22 +659,19 @@ class VideoClickAnnotator:
 
     def fit_to_window(self):
         """Fit video to current window size."""
-        # Force update to get actual canvas size
         self.root.update_idletasks()
 
         canvas_width = self.video_canvas.winfo_width()
         canvas_height = self.video_canvas.winfo_height()
 
-        if canvas_width > 10 and canvas_height > 10:  # Make sure canvas is rendered
+        if canvas_width > 10 and canvas_height > 10:
             scale_x = canvas_width / self.video_width
             scale_y = canvas_height / self.video_height
-            scale = min(scale_x, scale_y) * 0.95  # Leave some margin
+            scale = min(scale_x, scale_y) * 0.95
 
-            # Clamp to reasonable bounds
             scale = max(0.1, min(3.0, scale))
             self.set_scale(scale)
         else:
-            # Fallback if canvas size not available
             self.set_scale(0.8)
 
     def update_display(self):
@@ -565,29 +715,38 @@ class VideoClickAnnotator:
 
     def draw_court_overlay(self, frame):
         """Draw court lines overlay on the video frame."""
-        # Draw court boundary
-        court_corners = np.array([
-            self.court_points['P1'],
-            self.court_points['P2'],
-            self.court_points['P3'],
-            self.court_points['P4']
-        ], dtype=np.int32)
-
-        cv2.polylines(frame, [court_corners], True, (0, 255, 0), 2)
-
-        # Draw center line
         try:
-            # Net line (center of court)
-            net_left = self.world_to_pixel(0, self.COURT_LENGTH/2)
-            net_right = self.world_to_pixel(self.COURT_WIDTH, self.COURT_LENGTH/2)
+            # Draw court boundary using the corner points
+            corner_points = []
+            for corner in ['P1', 'P2', 'P3', 'P4']:
+                if corner in self.court_points:
+                    coords = self.normalize_point_coordinates(self.court_points[corner])
+                    # These are already in video pixel coordinates, so use directly
+                    corner_points.append([int(coords[0]), int(coords[1])])
 
-            net_left_pixel = (int(net_left[0] / self.display_scale), int(net_left[1] / self.display_scale))
-            net_right_pixel = (int(net_right[0] / self.display_scale), int(net_right[1] / self.display_scale))
+            if len(corner_points) == 4:
+                court_corners = np.array(corner_points, dtype=np.int32)
+                cv2.polylines(frame, [court_corners], True, (0, 255, 0), 2)
 
-            cv2.line(frame, net_left_pixel, net_right_pixel, (255, 0, 0), 2)
+            # Draw center line (net) using world coordinates
+            try:
+                # Convert world coordinates to pixel coordinates
+                net_left_world = (0, self.COURT_LENGTH/2)
+                net_right_world = (self.COURT_WIDTH, self.COURT_LENGTH/2)
 
-        except:
-            pass  # Skip overlay if transformation fails
+                # Transform to pixel coordinates
+                net_left_pixel = self.world_to_pixel_original(*net_left_world)
+                net_right_pixel = self.world_to_pixel_original(*net_right_world)
+
+                net_left_pt = (int(net_left_pixel[0]), int(net_left_pixel[1]))
+                net_right_pt = (int(net_right_pixel[0]), int(net_right_pixel[1]))
+
+                cv2.line(frame, net_left_pt, net_right_pt, (255, 0, 0), 2)
+            except Exception:
+                pass  # Skip net line if transformation fails
+
+        except Exception as e:
+            print(f"Court overlay error: {e}")
 
     def draw_annotation_markers(self, frame):
         """Draw markers for all player annotations."""
@@ -598,11 +757,12 @@ class VideoClickAnnotator:
 
         for player_id, (world_x, world_y) in frame_annotations.items():
             try:
-                pixel_x, pixel_y = self.world_to_pixel(world_x, world_y)
+                # Convert world coordinates to original pixel coordinates
+                pixel_x, pixel_y = self.world_to_pixel_original(world_x, world_y)
 
-                # Adjust for display scale
-                display_x = int(pixel_x / self.display_scale)
-                display_y = int(pixel_y / self.display_scale)
+                # Convert to frame coordinates (these are already at original scale)
+                display_x = int(pixel_x)
+                display_y = int(pixel_y)
 
                 # Get player color
                 color = self.player_colors.get(player_id, (255, 255, 255))
@@ -623,8 +783,8 @@ class VideoClickAnnotator:
                 if player_id == self.current_player:
                     cv2.circle(frame, (display_x, display_y), 25, color, 3)
 
-            except:
-                pass  # Skip marker if transformation fails
+            except Exception as e:
+                print(f"Marker drawing error for player {player_id}: {e}")
 
     def update_info_display(self):
         """Update frame and position information."""
@@ -669,7 +829,7 @@ class VideoClickAnnotator:
         """Update the small court reference display."""
         self.court_canvas.delete("all")
 
-        # Smaller court dimensions
+        # Court dimensions
         margin = 10
         court_width = 140
         court_height = 200
@@ -683,7 +843,7 @@ class VideoClickAnnotator:
         self.court_canvas.create_line(margin, net_y, margin + court_width, net_y,
                                       fill='red', width=2)
 
-        # Add compact labels
+        # Add labels
         self.court_canvas.create_text(margin + court_width//2, 5, text="Court",
                                       font=('Arial', 8, 'bold'))
         self.court_canvas.create_text(margin + court_width//2, margin - 5, text="Top",
@@ -849,7 +1009,8 @@ class VideoClickAnnotator:
                     'total_annotated_frames': len(self.annotations),
                     'annotation_method': 'video_click_with_homography_two_players',
                     'coverage_percentage': (len(self.annotations) / self.total_frames) * 100,
-                    'players_supported': [1, 2]
+                    'players_supported': [1, 2],
+                    'data_source': 'pipeline_compatible'
                 }
             }
 
@@ -976,7 +1137,8 @@ class VideoClickAnnotator:
                     'player2_positions': player2_count,
                     'annotation_coverage': len(self.annotations) / self.total_frames,
                     'players_supported': [1, 2],
-                    'coordinate_transformation': 'homography_matrix'
+                    'coordinate_transformation': 'homography_matrix',
+                    'pipeline_compatible': True
                 }
             }
 
@@ -1056,10 +1218,18 @@ def main():
         print("  ✓ Auto-advance logic for efficient annotation")
         print("  ✓ Mouse coordinates shown in real-time")
         print("  ✓ Visual markers and validation for both players")
-        print("  ✓ Data stored in current directory: ./[video_name]/")
+        print("  ✓ Compatible with standard pipeline outputs")
+        print("\nData Sources (checked in order):")
+        print("  1. results/[video_name]/pose.json (standard pipeline)")
+        print("  2. results/[video_name]/detections.csv (fallback)")
+        print("  3. [video_name]/pose.json (legacy format)")
         print("\nRequirements:")
-        print("  - Court detection must be run first (pose.json with court points)")
+        print("  - Court detection must be run first")
         print("  - Video file in supported format")
+        print("\nPipeline Integration:")
+        print("  1. Run: python detect_court.py <video>")
+        print("  2. Run: python detect_pose.py <video>")
+        print("  3. Run: python video_annotation_tool.py <video>")
         print("\nControls:")
         print("  - Select Player 1 or Player 2 with radio buttons")
         print("  - Click on video where selected player is positioned")
@@ -1085,7 +1255,29 @@ def main():
         sys.exit(1)
 
     print(f"Starting two-player video click annotation tool for: {video_path}")
-    print(f"Data will be stored in: ./{Path(video_path).stem}/")
+
+    # Check for required data files
+    video_name = Path(video_path).stem
+    results_dir = Path("results") / video_name
+
+    print(f"Looking for pipeline data in: {results_dir}")
+
+    # Check what files are available
+    available_files = []
+    if (results_dir / "pose.json").exists():
+        available_files.append("pose.json")
+    if (results_dir / "detections.csv").exists():
+        available_files.append("detections.csv")
+    if (results_dir / "calibration.csv").exists():
+        available_files.append("calibration.csv")
+
+    if available_files:
+        print(f"Found: {', '.join(available_files)}")
+    else:
+        print("Warning: No pipeline data found. Make sure to run court detection first:")
+        print(f"  python detect_court.py {video_path}")
+        print(f"  python detect_pose.py {video_path}")
+
     print("\nInstructions:")
     print("1. The video will display with court boundary overlay (green lines)")
     print("2. Select Player 1 (Red) or Player 2 (Blue) using radio buttons")

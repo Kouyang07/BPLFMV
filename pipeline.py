@@ -40,7 +40,7 @@ class BPLFMVPipeline:
         self.results_dir = Path("results") / self.video_name
 
         # Stage file paths
-        self.court_csv = self.results_dir / "court.csv"
+        self.court_csv = self.results_dir / "detections.csv"
         self.pose_json = self.results_dir / "pose.json"
         self.positions_json = self.results_dir / "positions.json"
         self.corrected_positions_json = self.results_dir / "corrected_positions.json"

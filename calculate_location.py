@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced Badminton Player Ankle Tracker with High-Impact Improvements
+Simple Dual Player Tracker for Badminton - No Hungarian Assignment
 
-High-impact improvements:
-1. Appearance-based identity tracking to prevent player swaps
-2. Adaptive distance thresholds based on video characteristics
-3. Spatial overlap detection for close player interactions
+This implementation tracks exactly 2 players using simple distance-based assignment,
+eliminating the complex Hungarian assignment that was causing excessive player ID creation.
 
-Usage: python calculate_location.py <video_file_path> [--debug]
+Usage: python calculate_location_dual.py <video_file_path> [--debug]
 """
 
 import sys
@@ -19,8 +17,6 @@ import cv2
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict, deque
-from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
 from dataclasses import dataclass
 import math
 
@@ -43,17 +39,13 @@ def convert_numpy_types(obj):
 
 @dataclass
 class PlayerState:
-    """Player tracking state with appearance features."""
+    """Simple player state for dual tracking."""
     player_id: str
     last_position: Tuple[float, float]
     last_frame: int
     velocity: Tuple[float, float]
     confidence_history: deque
     trajectory: deque
-    occlusion_count: int = 0
-    predicted_position: Optional[Tuple[float, float]] = None
-    tracking_quality: float = 1.0
-    appearance_rgb: Optional[Tuple[float, float, float]] = None
     consecutive_detections: int = 0
 
     def __post_init__(self):
@@ -63,104 +55,46 @@ class PlayerState:
             self.trajectory = deque(maxlen=15)
 
 
-class AdvancedPlayerTracker:
-    """Player tracker with high-impact improvements."""
+class DualPlayerTracker:
+    """Simple tracker for exactly 2 badminton players."""
 
     def __init__(self, court_width: float = 6.1, court_length: float = 13.4, debug: bool = False):
         self.court_width = court_width
         self.court_length = court_length
         self.debug = debug
 
-        # Adaptive threshold parameters
-        self.base_distance_threshold = 1.5
-        self.max_distance_threshold = 1.5  # Will be updated adaptively
-        self.movement_history = deque(maxlen=100)  # For adaptive threshold calculation
+        # Simple parameters
+        self.max_distance_threshold = 2.0  # Maximum distance for assignment
+        self.occlusion_max_frames = 30     # Frames to keep tracking during occlusion
 
-        # Core tracking parameters
-        self.trajectory_history_frames = 15
-        self.occlusion_max_frames = 12
-        self.confidence_history_frames = 10
-        self.min_consecutive_detections = 5  # Require stable detection before assigning ID
-
-        # Assignment weights
-        self.velocity_weight = 0.4
-        self.position_weight = 0.6
-        self.confidence_weight = 0.3
-        self.temporal_weight = 0.2
-        self.appearance_weight = 0.3  # New: appearance similarity weight
-
-        # Motion constraints
-        self.max_velocity = 8.0
-        self.acceleration_limit = 15.0
-        self.prediction_frames = 3
-
-        # Spatial overlap detection
-        self.overlap_threshold = 0.3  # Bounding box overlap ratio to trigger special handling
-
-        # Player state tracking
-        self.player_states: Dict[str, PlayerState] = {}
-        self.next_player_id = 0
+        # Two player states exactly
+        self.player_0: Optional[PlayerState] = None
+        self.player_1: Optional[PlayerState] = None
         self.frame_rate = 30.0
-        self.initialization_complete = False
+        self.initialized = False
 
     def set_frame_rate(self, fps: float):
         """Set video frame rate."""
         self.frame_rate = max(1.0, fps)
 
-    def _update_adaptive_threshold(self, movements: List[float]):
-        """Update distance threshold based on observed movements."""
-        self.movement_history.extend(movements)
+    def _calculate_position_confidence(self, ankle_detections: List[Dict]) -> float:
+        """Calculate position confidence."""
+        if not ankle_detections:
+            return 0.0
 
-        if len(self.movement_history) >= 50 and not self.initialization_complete:
-            # Calculate 95th percentile of movements
-            sorted_movements = sorted(self.movement_history)
-            percentile_95 = sorted_movements[int(0.95 * len(sorted_movements))]
+        joint_confidences = [ankle['joint_confidence'] for ankle in ankle_detections]
+        avg_confidence = sum(joint_confidences) / len(joint_confidences)
 
-            # Set threshold as 2x the 95th percentile
-            self.max_distance_threshold = max(self.base_distance_threshold, percentile_95 * 2.0)
-            self.initialization_complete = True
-
-            if self.debug:
-                print(f"Adaptive threshold set to {self.max_distance_threshold:.2f}m")
-
-    def _calculate_appearance_similarity(self, detection: Dict, player_state: PlayerState) -> float:
-        """Calculate RGB color similarity between detection and stored appearance."""
-        if player_state.appearance_rgb is None:
-            return 0.5  # Neutral score if no appearance data
-
-        # Extract RGB from detection bounding box (simplified)
-        # In real implementation, this would extract from the actual image region
-        # For now, use a placeholder based on position hash
-        det_x, det_y = detection['center_position']['x'], detection['center_position']['y']
-        det_rgb = (
-            abs(hash(f"{det_x:.1f}")) % 256 / 255.0,
-            abs(hash(f"{det_y:.1f}")) % 256 / 255.0,
-            abs(hash(f"{det_x + det_y:.1f}")) % 256 / 255.0
-        )
-
-        # Calculate RGB distance
-        rgb_dist = math.sqrt(sum((a - b)**2 for a, b in zip(det_rgb, player_state.appearance_rgb)))
-        similarity = max(0.0, 1.0 - rgb_dist / math.sqrt(3))  # Normalize to [0,1]
-
-        return similarity
-
-    def _detect_spatial_overlap(self, detections: List[Dict]) -> List[Tuple[int, int]]:
-        """Detect which detections have spatial overlap."""
-        overlaps = []
-
-        for i in range(len(detections)):
-            for j in range(i + 1, len(detections)):
-                det1 = detections[i]['center_position']
-                det2 = detections[j]['center_position']
-
-                # Calculate distance
-                distance = math.sqrt((det1['x'] - det2['x'])**2 + (det1['y'] - det2['y'])**2)
-
-                # Consider overlap if within typical player size (0.5m radius)
-                if distance < 1.0:  # Players are close
-                    overlaps.append((i, j))
-
-        return overlaps
+        if len(ankle_detections) == 2:
+            ankle1, ankle2 = ankle_detections[0], ankle_detections[1]
+            distance = np.sqrt((ankle1['world_x'] - ankle2['world_x'])**2 +
+                               (ankle1['world_y'] - ankle2['world_y'])**2)
+            if 0.05 <= distance <= 0.6:
+                return min(1.0, avg_confidence * 1.15)
+            else:
+                return avg_confidence * 0.7
+        else:
+            return avg_confidence * 0.85
 
     def _calculate_velocity(self, positions: List[Tuple[float, float, int]]) -> Tuple[float, float]:
         """Calculate velocity from position history."""
@@ -169,7 +103,6 @@ class AdvancedPlayerTracker:
 
         velocities = []
         weights = []
-        movements = []
 
         for i in range(len(positions) - 1):
             pos1 = positions[i]
@@ -181,20 +114,14 @@ class AdvancedPlayerTracker:
 
             dx = pos2[0] - pos1[0]
             dy = pos2[1] - pos1[1]
-            movement = math.sqrt(dx*dx + dy*dy)
-            movements.append(movement)
 
             vx = dx / dt
             vy = dy / dt
 
             speed = math.sqrt(vx*vx + vy*vy)
-            if speed <= self.max_velocity:
+            if speed <= 8.0:  # Max reasonable velocity
                 velocities.append((vx, vy))
                 weights.append(math.exp(-i * 0.1))
-
-        # Update adaptive threshold with observed movements
-        if movements:
-            self._update_adaptive_threshold(movements)
 
         if not velocities:
             return (0.0, 0.0)
@@ -225,233 +152,161 @@ class AdvancedPlayerTracker:
         predicted_x = pos_x + vel_x * dt * damping
         predicted_y = pos_y + vel_y * dt * damping
 
-        # Soft boundary correction
-        if predicted_x < 0:
-            predicted_x = predicted_x * 0.3
-        elif predicted_x > self.court_width:
-            predicted_x = self.court_width + (predicted_x - self.court_width) * 0.3
-
-        if predicted_y < 0:
-            predicted_y = predicted_y * 0.3
-        elif predicted_y > self.court_length:
-            predicted_y = self.court_length + (predicted_y - self.court_length) * 0.3
-
         return (predicted_x, predicted_y)
 
-    def _calculate_position_confidence(self, ankle_detections: List[Dict]) -> float:
-        """Calculate position confidence."""
-        if not ankle_detections:
-            return 0.0
+    def _initialize_players(self, detections: List[Dict], frame_idx: int):
+        """Initialize the two players with first detections."""
+        if len(detections) >= 2:
+            # Sort detections by Y position (court length) to get consistent assignment
+            sorted_dets = sorted(detections, key=lambda d: d['center_position']['y'])
 
-        joint_confidences = [ankle['joint_confidence'] for ankle in ankle_detections]
-        avg_confidence = sum(joint_confidences) / len(joint_confidences)
+            # Player 0 gets the detection with smaller Y (closer to net)
+            det0 = sorted_dets[0]
+            pos0 = (det0['center_position']['x'], det0['center_position']['y'])
+            confidence0 = self._calculate_position_confidence(det0['ankles'])
 
-        if len(ankle_detections) == 2:
-            ankle1, ankle2 = ankle_detections[0], ankle_detections[1]
-            distance = np.sqrt((ankle1['world_x'] - ankle2['world_x'])**2 +
-                               (ankle1['world_y'] - ankle2['world_y'])**2)
-            if 0.05 <= distance <= 0.6:
-                return min(1.0, avg_confidence * 1.15)
-            else:
-                return avg_confidence * 0.7
-        else:
-            return avg_confidence * 0.85
+            self.player_0 = PlayerState(
+                player_id='player_0',
+                last_position=pos0,
+                last_frame=frame_idx,
+                velocity=(0.0, 0.0),
+                confidence_history=deque([confidence0], maxlen=10),
+                trajectory=deque([(*pos0, frame_idx)], maxlen=15),
+                consecutive_detections=1
+            )
 
-    def _calculate_assignment_cost(self, detection: Dict, player_state: PlayerState, frame_idx: int) -> float:
-        """Enhanced cost calculation with appearance similarity."""
-        detection_pos = (detection['center_position']['x'], detection['center_position']['y'])
+            # Player 1 gets the detection with larger Y (farther from net)
+            det1 = sorted_dets[1]
+            pos1 = (det1['center_position']['x'], det1['center_position']['y'])
+            confidence1 = self._calculate_position_confidence(det1['ankles'])
 
-        # Spatial cost
-        if player_state.predicted_position:
-            predicted_pos = player_state.predicted_position
-        else:
-            predicted_pos = self._predict_position(player_state, frame_idx)
+            self.player_1 = PlayerState(
+                player_id='player_1',
+                last_position=pos1,
+                last_frame=frame_idx,
+                velocity=(0.0, 0.0),
+                confidence_history=deque([confidence1], maxlen=10),
+                trajectory=deque([(*pos1, frame_idx)], maxlen=15),
+                consecutive_detections=1
+            )
 
-        spatial_distance = np.sqrt((detection_pos[0] - predicted_pos[0])**2 +
-                                   (detection_pos[1] - predicted_pos[1])**2)
+            self.initialized = True
 
-        # Velocity consistency cost
-        velocity_cost = 0.0
-        if len(player_state.trajectory) >= 2:
-            dt = (frame_idx - player_state.last_frame) / self.frame_rate
-            if dt > 0:
-                implied_velocity = (
-                    (detection_pos[0] - player_state.last_position[0]) / dt,
-                    (detection_pos[1] - player_state.last_position[1]) / dt
-                )
-
-                vel_diff_x = implied_velocity[0] - player_state.velocity[0]
-                vel_diff_y = implied_velocity[1] - player_state.velocity[1]
-                velocity_cost = math.sqrt(vel_diff_x*vel_diff_x + vel_diff_y*vel_diff_y) * 0.1
-
-        # Temporal cost
-        frames_gap = frame_idx - player_state.last_frame
-        temporal_cost = min(2.0, frames_gap * 0.05)
-
-        # Confidence cost
-        detection_confidence = self._calculate_position_confidence(detection['ankles'])
-        confidence_cost = (1.0 - detection_confidence) * self.confidence_weight
-
-        # Appearance cost (new)
-        appearance_similarity = self._calculate_appearance_similarity(detection, player_state)
-        appearance_cost = (1.0 - appearance_similarity) * self.appearance_weight
-
-        # Occlusion penalty
-        occlusion_cost = min(1.0, player_state.occlusion_count * 0.1)
-
-        total_cost = (spatial_distance * self.position_weight +
-                      velocity_cost * self.velocity_weight +
-                      temporal_cost * self.temporal_weight +
-                      confidence_cost +
-                      appearance_cost +
-                      occlusion_cost * 0.15)
-
-        return total_cost
-
-    def _assign_detections_to_players(self, detections: List[Dict], frame_idx: int) -> Dict[int, str]:
-        """Assign detections to players with improved handling."""
-        if not detections:
-            return {}
-
-        # Detect spatial overlaps
-        overlaps = self._detect_spatial_overlap(detections)
-        if overlaps and self.debug:
-            print(f"Frame {frame_idx}: Detected {len(overlaps)} spatial overlaps")
-
-        # Get active players
-        active_players = []
-        for player_id, player_state in self.player_states.items():
-            frames_gap = frame_idx - player_state.last_frame
-            if frames_gap <= self.occlusion_max_frames:
-                player_state.predicted_position = self._predict_position(player_state, frame_idx)
-                active_players.append(player_id)
-
-        if not active_players:
-            # No existing players, create new ones (with consecutive detection requirement)
-            assignments = {}
-            for i in range(len(detections)):
-                new_id = f"candidate_{self.next_player_id}"
-                self.next_player_id += 1
-                assignments[i] = new_id
-            return assignments
-
-        # Build cost matrix
-        max_assignments = max(len(detections), len(active_players))
-        all_player_ids = active_players + [f"new_{i}" for i in range(max_assignments - len(active_players))]
-
-        cost_matrix = np.full((len(detections), len(all_player_ids)), np.inf)
-
-        for det_idx, detection in enumerate(detections):
-            detection_confidence = self._calculate_position_confidence(detection['ankles'])
-
-            for player_idx, player_id in enumerate(all_player_ids):
-                if player_id.startswith("new_"):
-                    # Higher cost for new players, prefer existing ones
-                    new_player_cost = 2.5 - detection_confidence * 0.5
-                    cost_matrix[det_idx, player_idx] = new_player_cost
-                else:
-                    player_state = self.player_states[player_id]
-                    cost = self._calculate_assignment_cost(detection, player_state, frame_idx)
-
-                    # Apply adaptive threshold
-                    threshold = self.max_distance_threshold * (1.0 + player_state.occlusion_count * 0.2)
-
-                    # Increase cost if players are overlapping (encourage stable assignment)
-                    if any(det_idx in overlap for overlap in overlaps):
-                        cost *= 1.2
-
-                    if cost <= threshold:
-                        cost_matrix[det_idx, player_idx] = cost
-
-        # Solve assignment
-        try:
-            det_indices, player_indices = linear_sum_assignment(cost_matrix)
-            assignments = {}
-
-            for det_idx, player_idx in zip(det_indices, player_indices):
-                if cost_matrix[det_idx, player_idx] < np.inf:
-                    player_id = all_player_ids[player_idx]
-                    if player_id.startswith("new_"):
-                        new_id = f"candidate_{self.next_player_id}"
-                        self.next_player_id += 1
-                        assignments[det_idx] = new_id
-                    else:
-                        assignments[det_idx] = player_id
-                else:
-                    new_id = f"candidate_{self.next_player_id}"
-                    self.next_player_id += 1
-                    assignments[det_idx] = new_id
-
-            return assignments
-
-        except Exception as e:
             if self.debug:
-                print(f"Assignment failed: {e}")
-            return self._fallback_assignment(detections, frame_idx)
+                print(f"Frame {frame_idx}: Initialized player_0 at ({pos0[0]:.1f},{pos0[1]:.1f}) and player_1 at ({pos1[0]:.1f},{pos1[1]:.1f})")
 
-    def _fallback_assignment(self, detections: List[Dict], frame_idx: int) -> Dict[int, str]:
-        """Simple fallback assignment."""
+        elif len(detections) == 1:
+            # Only one detection - initialize player_0 first
+            det0 = detections[0]
+            pos0 = (det0['center_position']['x'], det0['center_position']['y'])
+            confidence0 = self._calculate_position_confidence(det0['ankles'])
+
+            self.player_0 = PlayerState(
+                player_id='player_0',
+                last_position=pos0,
+                last_frame=frame_idx,
+                velocity=(0.0, 0.0),
+                confidence_history=deque([confidence0], maxlen=10),
+                trajectory=deque([(*pos0, frame_idx)], maxlen=15),
+                consecutive_detections=1
+            )
+
+            if self.debug:
+                print(f"Frame {frame_idx}: Initialized player_0 at ({pos0[0]:.1f},{pos0[1]:.1f}), waiting for player_1")
+
+    def _assign_detections_simple(self, detections: List[Dict], frame_idx: int) -> Dict[int, str]:
+        """Simple assignment for exactly 2 players using distance."""
         assignments = {}
+
+        if not detections:
+            return assignments
+
+        # Get current player positions (predicted if occluded)
+        player_positions = {}
+
+        if self.player_0:
+            frames_gap = frame_idx - self.player_0.last_frame
+            if frames_gap <= self.occlusion_max_frames:
+                if frames_gap > 0:
+                    player_positions['player_0'] = self._predict_position(self.player_0, frame_idx)
+                else:
+                    player_positions['player_0'] = self.player_0.last_position
+
+        if self.player_1:
+            frames_gap = frame_idx - self.player_1.last_frame
+            if frames_gap <= self.occlusion_max_frames:
+                if frames_gap > 0:
+                    player_positions['player_1'] = self._predict_position(self.player_1, frame_idx)
+                else:
+                    player_positions['player_1'] = self.player_1.last_position
+
+        if not player_positions:
+            return assignments
+
+        # For each detection, find closest player
         used_players = set()
 
         for det_idx, detection in enumerate(detections):
-            best_player = None
-            best_cost = float('inf')
+            det_pos = (detection['center_position']['x'], detection['center_position']['y'])
 
-            for player_id, player_state in self.player_states.items():
+            best_player = None
+            best_distance = float('inf')
+
+            for player_id, player_pos in player_positions.items():
                 if player_id in used_players:
                     continue
 
-                frames_gap = frame_idx - player_state.last_frame
-                if frames_gap <= self.occlusion_max_frames:
-                    cost = self._calculate_assignment_cost(detection, player_state, frame_idx)
-                    if cost < best_cost and cost <= self.max_distance_threshold:
-                        best_cost = cost
-                        best_player = player_id
+                distance = np.sqrt((det_pos[0] - player_pos[0])**2 + (det_pos[1] - player_pos[1])**2)
+
+                if distance < best_distance and distance <= self.max_distance_threshold:
+                    best_distance = distance
+                    best_player = player_id
 
             if best_player:
                 assignments[det_idx] = best_player
                 used_players.add(best_player)
+
+                if self.debug:
+                    print(f"Frame {frame_idx}: Assigned detection {det_idx} at ({det_pos[0]:.1f},{det_pos[1]:.1f}) to {best_player} (dist: {best_distance:.2f}m)")
             else:
-                new_id = f"candidate_{self.next_player_id}"
-                self.next_player_id += 1
-                assignments[det_idx] = new_id
+                # Handle case where we need to initialize second player
+                if not self.player_1 and len(detections) >= 2:
+                    assignments[det_idx] = 'player_1'
+                    if self.debug:
+                        print(f"Frame {frame_idx}: Assigning detection {det_idx} to initialize player_1")
+                elif self.debug:
+                    print(f"Frame {frame_idx}: No assignment for detection {det_idx} at ({det_pos[0]:.1f},{det_pos[1]:.1f}) - distance too large")
 
         return assignments
 
     def _update_player_state(self, player_id: str, detection: Dict, frame_idx: int):
-        """Update player state with appearance tracking."""
+        """Update player state."""
         center_pos = detection['center_position']
         position = (center_pos['x'], center_pos['y'])
         confidence = self._calculate_position_confidence(detection['ankles'])
 
-        if player_id not in self.player_states:
-            # Create new player state with appearance
-            det_x, det_y = position
-            appearance_rgb = (
-                abs(hash(f"{det_x:.1f}")) % 256 / 255.0,
-                abs(hash(f"{det_y:.1f}")) % 256 / 255.0,
-                abs(hash(f"{det_x + det_y:.1f}")) % 256 / 255.0
-            )
-
-            self.player_states[player_id] = PlayerState(
-                player_id=player_id,
-                last_position=position,
-                last_frame=frame_idx,
-                velocity=(0.0, 0.0),
-                confidence_history=deque([confidence], maxlen=self.confidence_history_frames),
-                trajectory=deque([(position[0], position[1], frame_idx)], maxlen=self.trajectory_history_frames),
-                occlusion_count=0,
-                tracking_quality=confidence,
-                appearance_rgb=appearance_rgb,
-                consecutive_detections=1
-            )
+        if player_id == 'player_0':
+            player_state = self.player_0
+        elif player_id == 'player_1':
+            if not self.player_1:
+                # Initialize player_1
+                self.player_1 = PlayerState(
+                    player_id='player_1',
+                    last_position=position,
+                    last_frame=frame_idx,
+                    velocity=(0.0, 0.0),
+                    confidence_history=deque([confidence], maxlen=10),
+                    trajectory=deque([(*position, frame_idx)], maxlen=15),
+                    consecutive_detections=1
+                )
+                if self.debug:
+                    print(f"Frame {frame_idx}: Initialized player_1 at ({position[0]:.1f},{position[1]:.1f})")
+                return
+            player_state = self.player_1
         else:
-            player_state = self.player_states[player_id]
+            return  # Unknown player_id
 
-            # Update consecutive detections
-            player_state.consecutive_detections += 1
-
+        if player_state:
             # Update trajectory
             player_state.trajectory.append((position[0], position[1], frame_idx))
 
@@ -462,38 +317,14 @@ class AdvancedPlayerTracker:
             # Update confidence
             player_state.confidence_history.append(confidence)
 
-            # Update appearance (gradual adaptation)
-            if player_state.appearance_rgb:
-                det_x, det_y = position
-                new_rgb = (
-                    abs(hash(f"{det_x:.1f}")) % 256 / 255.0,
-                    abs(hash(f"{det_y:.1f}")) % 256 / 255.0,
-                    abs(hash(f"{det_x + det_y:.1f}")) % 256 / 255.0
-                )
-                # Gradual update: 90% old, 10% new
-                player_state.appearance_rgb = tuple(
-                    0.9 * old + 0.1 * new for old, new in zip(player_state.appearance_rgb, new_rgb)
-                )
-
-            # Reset occlusion
-            player_state.occlusion_count = 0
+            # Update position and frame
             player_state.last_position = position
             player_state.last_frame = frame_idx
-
-    def _handle_occlusions(self, frame_idx: int):
-        """Handle occluded players."""
-        for player_id, player_state in self.player_states.items():
-            frames_gap = frame_idx - player_state.last_frame
-
-            if 0 < frames_gap <= self.occlusion_max_frames:
-                player_state.occlusion_count = frames_gap
-                player_state.predicted_position = self._predict_position(player_state, frame_idx)
-                player_state.tracking_quality *= 0.9
+            player_state.consecutive_detections += 1
 
     def process_frame_detections(self, frame_ankle_data: Dict[int, List[Dict]], frame_idx: int) -> Dict[str, Dict[str, Any]]:
-        """Process frame with high-impact improvements."""
+        """Process frame with simple dual player tracking."""
         if not frame_ankle_data:
-            self._handle_occlusions(frame_idx)
             return {}
 
         # Convert to detection format
@@ -511,30 +342,24 @@ class AdvancedPlayerTracker:
                 'center_position': {'x': float(avg_x), 'y': float(avg_y)}
             })
 
-        self._handle_occlusions(frame_idx)
+        if self.debug:
+            active_count = int(bool(self.player_0)) + int(bool(self.player_1))
+            print(f"Frame {frame_idx}: {len(detections)} detections, {active_count}/2 players initialized")
 
-        # Assign player IDs
-        assignments = self._assign_detections_to_players(detections, frame_idx)
+        # Initialize players if not done yet
+        if not self.initialized:
+            self._initialize_players(detections, frame_idx)
+            if not self.initialized and len(detections) == 0:
+                return {}
+
+        # Simple assignment for 2 players
+        assignments = self._assign_detections_simple(detections, frame_idx)
 
         # Build result and update states
         frame_players = {}
+
         for det_idx, player_id in assignments.items():
             detection = detections[det_idx]
-
-            # Only include players with sufficient consecutive detections
-            if player_id.startswith("candidate_"):
-                # Check if this candidate has enough consecutive detections
-                if player_id in self.player_states:
-                    if self.player_states[player_id].consecutive_detections >= self.min_consecutive_detections:
-                        # Promote candidate to official player
-                        official_id = f"player_{len([p for p in self.player_states if p.startswith('player_')])}"
-                        self.player_states[official_id] = self.player_states[player_id]
-                        self.player_states[official_id].player_id = official_id
-                        del self.player_states[player_id]
-                        player_id = official_id
-                    else:
-                        # Still in candidate phase
-                        pass
 
             frame_players[player_id] = {
                 'ankles': detection['ankles'],
@@ -543,55 +368,47 @@ class AdvancedPlayerTracker:
 
             self._update_player_state(player_id, detection, frame_idx)
 
-        # Only return official players for output
-        return {k: v for k, v in frame_players.items() if k.startswith('player_')}
+        return frame_players
 
     def get_final_player_mapping(self) -> Dict[str, str]:
         """Get mapping to standard player_0, player_1 format."""
-        official_players = {k: v for k, v in self.player_states.items() if k.startswith('player_')}
-
-        if not official_players:
-            return {}
-
-        # Score by activity and quality
-        player_scores = {}
-        for player_id, player_state in official_players.items():
-            activity_score = len(player_state.trajectory)
-            quality_score = player_state.tracking_quality * 100
-            recency_score = max(0, 100 - player_state.occlusion_count * 10)
-            total_score = activity_score + quality_score + recency_score
-            player_scores[player_id] = total_score
-
-        sorted_players = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
-
+        # For dual tracking, mapping is direct
         mapping = {}
-        if len(sorted_players) >= 1:
-            mapping[sorted_players[0][0]] = "player_0"
-        if len(sorted_players) >= 2:
-            mapping[sorted_players[1][0]] = "player_1"
-
+        if self.player_0:
+            mapping['player_0'] = 'player_0'
+        if self.player_1:
+            mapping['player_1'] = 'player_1'
         return mapping
 
     def print_tracking_stats(self):
-        """Print tracking statistics."""
-        official_players = {k: v for k, v in self.player_states.items() if k.startswith('player_')}
+        """Print dual player tracking statistics."""
+        print("\\n=== DUAL PLAYER TRACKING STATISTICS ===")
+        print(f"Initialized: {self.initialized}")
+        print(f"Distance threshold: {self.max_distance_threshold:.2f}m")
 
-        if not official_players:
-            print("No stable players tracked")
-            return
+        if self.player_0:
+            frames_tracked = len(self.player_0.trajectory)
+            avg_confidence = (sum(self.player_0.confidence_history) / len(self.player_0.confidence_history)
+                              if self.player_0.confidence_history else 0)
+            last_pos = self.player_0.last_position
+            print(f"Player 0: {frames_tracked} frames, conf={avg_confidence:.2f}, pos=({last_pos[0]:.1f},{last_pos[1]:.1f})")
+        else:
+            print("Player 0: Not initialized")
 
-        print(f"Tracked players: {len(official_players)}")
-        print(f"Adaptive threshold: {self.max_distance_threshold:.2f}m")
+        if self.player_1:
+            frames_tracked = len(self.player_1.trajectory)
+            avg_confidence = (sum(self.player_1.confidence_history) / len(self.player_1.confidence_history)
+                              if self.player_1.confidence_history else 0)
+            last_pos = self.player_1.last_position
+            print(f"Player 1: {frames_tracked} frames, conf={avg_confidence:.2f}, pos=({last_pos[0]:.1f},{last_pos[1]:.1f})")
+        else:
+            print("Player 1: Not initialized")
 
-        for player_id, player_state in official_players.items():
-            frames_tracked = len(player_state.trajectory)
-            avg_confidence = (sum(player_state.confidence_history) / len(player_state.confidence_history)
-                              if player_state.confidence_history else 0)
-            print(f"{player_id}: {frames_tracked} frames, quality={player_state.tracking_quality:.2f}, conf={avg_confidence:.2f}")
+        print("=" * 45)
 
 
-class EnhancedAnkleTracker:
-    """Enhanced tracker with high-impact improvements."""
+class SimpleAnkleTracker:
+    """Simple dual player ankle tracker."""
 
     COURT_WIDTH = 6.1
     COURT_LENGTH = 13.4
@@ -619,7 +436,7 @@ class EnhancedAnkleTracker:
         self.calibration_available = False
         self.enhanced_ankle_offset = None
 
-        self.player_tracker = AdvancedPlayerTracker(
+        self.player_tracker = DualPlayerTracker(
             court_width=self.COURT_WIDTH,
             court_length=self.COURT_LENGTH,
             debug=debug
@@ -826,7 +643,7 @@ class EnhancedAnkleTracker:
                 'world_x': float(left_world_x),
                 'world_y': float(left_world_y),
                 'joint_confidence': left_confidence,
-                'method': 'enhanced_homography' if self.calibration_available else 'basic_homography'
+                'method': 'simple_dual_tracking'
             })
 
         ankle_right_pixel = self.extract_joint_position(joints, self.ANKLE_RIGHT)
@@ -844,7 +661,7 @@ class EnhancedAnkleTracker:
                 'world_x': float(right_world_x),
                 'world_y': float(right_world_y),
                 'joint_confidence': right_confidence,
-                'method': 'enhanced_homography' if self.calibration_available else 'basic_homography'
+                'method': 'simple_dual_tracking'
             })
 
         return ankle_detections
@@ -865,7 +682,7 @@ class EnhancedAnkleTracker:
                 self.frame_data_internal[frame_index] = player_assignments
 
     def process_all_frames(self) -> None:
-        """Process all frames with enhanced tracking."""
+        """Process all frames with simple dual tracking."""
         pose_data = self.pose_data.get('pose_data', [])
 
         if not pose_data:
@@ -880,7 +697,7 @@ class EnhancedAnkleTracker:
             frames_data[frame_idx].append(entry)
 
         if self.debug:
-            print(f"Processing {len(frames_data)} frames")
+            print(f"Processing {len(frames_data)} frames with simple dual tracking")
 
         for frame_idx in sorted(frames_data.keys()):
             frame_data = frames_data[frame_idx]
@@ -910,46 +727,6 @@ class EnhancedAnkleTracker:
 
         return standard_frame_data
 
-    def validate_results(self) -> None:
-        """Validate tracking results."""
-        if not self.frame_data_internal:
-            print("No frame data to validate")
-            return
-
-        sample_positions = []
-        for frame_data in self.frame_data_internal.values():
-            for player_data in frame_data.values():
-                for ankle in player_data['ankles']:
-                    sample_positions.append(ankle)
-
-        if len(sample_positions) < 10:
-            print("Too few positions for validation")
-            return
-
-        x_positions = [pos['world_x'] for pos in sample_positions]
-        y_positions = [pos['world_y'] for pos in sample_positions]
-
-        out_of_bounds = sum(1 for pos in sample_positions
-                            if pos['world_x'] < -0.5 or pos['world_x'] > self.COURT_WIDTH + 0.5 or
-                            pos['world_y'] < -0.5 or pos['world_y'] > self.COURT_LENGTH + 0.5)
-
-        print(f"=== Tracking Quality ===")
-        print(f"Positions: {len(sample_positions)}")
-        print(f"X range: {min(x_positions):.2f} to {max(x_positions):.2f}m")
-        print(f"Y range: {min(y_positions):.2f} to {max(y_positions):.2f}m")
-        print(f"Out of bounds: {out_of_bounds}/{len(sample_positions)} ({out_of_bounds/len(sample_positions):.1%})")
-
-        spatial_quality = 1.0 - (out_of_bounds / len(sample_positions))
-        overall_quality = spatial_quality
-
-        print(f"Overall quality: {overall_quality:.2f}")
-        if overall_quality > 0.8:
-            print("Quality: Excellent")
-        elif overall_quality > 0.6:
-            print("Quality: Good")
-        else:
-            print("Quality: Needs improvement")
-
     def save_results(self) -> None:
         """Save results with tracking metadata."""
         frame_data_dict = self.convert_to_standard_format()
@@ -958,8 +735,6 @@ class EnhancedAnkleTracker:
         total_ankle_detections = 0
         player_0_detections = 0
         player_1_detections = 0
-        left_ankle_detections = 0
-        right_ankle_detections = 0
 
         for frame_data in frame_data_dict.values():
             if 'player_0' in frame_data:
@@ -967,26 +742,7 @@ class EnhancedAnkleTracker:
             if 'player_1' in frame_data:
                 player_1_detections += len(frame_data['player_1']['ankles'])
 
-            for player_data in frame_data.values():
-                for ankle in player_data['ankles']:
-                    total_ankle_detections += 1
-                    if ankle['ankle_side'] == 'left':
-                        left_ankle_detections += 1
-                    else:
-                        right_ankle_detections += 1
-
-        tracking_quality_metrics = {}
-        player_mapping = self.player_tracker.get_final_player_mapping()
-        for internal_id, standard_id in player_mapping.items():
-            if internal_id in self.player_tracker.player_states:
-                player_state = self.player_tracker.player_states[internal_id]
-                tracking_quality_metrics[standard_id] = {
-                    'tracking_quality': float(player_state.tracking_quality),
-                    'max_occlusion_frames': int(player_state.occlusion_count),
-                    'trajectory_length': len(player_state.trajectory),
-                    'avg_confidence': float(sum(player_state.confidence_history) / len(player_state.confidence_history))
-                    if player_state.confidence_history else 0.0
-                }
+        total_ankle_detections = player_0_detections + player_1_detections
 
         output_data = {
             'video_info': {
@@ -1006,26 +762,9 @@ class EnhancedAnkleTracker:
                 'total_ankle_detections': total_ankle_detections,
                 'player_0_detections': player_0_detections,
                 'player_1_detections': player_1_detections,
-                'left_ankle_detections': left_ankle_detections,
-                'right_ankle_detections': right_ankle_detections,
-                'primary_method': 'enhanced_homography' if self.calibration_available else 'basic_homography',
-                'calibration_enhanced': self.calibration_available,
-                'high_impact_improvements': True
+                'method': 'simple_dual_tracking',
+                'players_created': 2
             },
-            'improvements': {
-                'adaptive_distance_threshold': self.player_tracker.max_distance_threshold,
-                'appearance_tracking_enabled': True,
-                'spatial_overlap_detection': True,
-                'consecutive_detection_requirement': self.player_tracker.min_consecutive_detections,
-                'soft_boundary_correction': True
-            },
-            'tracking_parameters': {
-                'max_distance_threshold_m': self.player_tracker.max_distance_threshold,
-                'occlusion_max_frames': self.player_tracker.occlusion_max_frames,
-                'min_consecutive_detections': self.player_tracker.min_consecutive_detections,
-                'appearance_weight': self.player_tracker.appearance_weight
-            },
-            'quality_metrics': tracking_quality_metrics,
             'frame_data': frame_data_dict
         }
 
@@ -1039,20 +778,19 @@ class EnhancedAnkleTracker:
         print(f"Frames with data: {total_frames_with_data}")
         print(f"Player 0: {player_0_detections} detections")
         print(f"Player 1: {player_1_detections} detections")
-        print(f"Adaptive threshold: {self.player_tracker.max_distance_threshold:.2f}m")
+        print(f"Method: Simple dual tracking (NO Hungarian assignment)")
 
     def run(self) -> None:
-        """Run enhanced ankle tracking pipeline."""
-        print(f"Starting enhanced ankle tracking: {self.video_name}")
+        """Run simple dual tracking pipeline."""
+        print(f"Starting simple dual player tracking: {self.video_name}")
 
         try:
             self.load_calibration_data()
             self.load_pose_data()
             self.calculate_homography()
             self.process_all_frames()
-            self.validate_results()
             self.save_results()
-            print("Enhanced ankle tracking completed!")
+            print("Simple dual tracking completed!")
 
         except Exception as e:
             print(f"Error during processing: {e}")
@@ -1065,13 +803,8 @@ class EnhancedAnkleTracker:
 def main():
     """Main function."""
     if len(sys.argv) < 2:
-        print("Usage: python calculate_location.py <video_file_path> [--debug]")
-        print("\nHigh-impact improvements:")
-        print("- Adaptive distance thresholds based on video characteristics")
-        print("- Appearance-based tracking to prevent identity swaps")
-        print("- Spatial overlap detection for close player interactions")
-        print("- Consecutive detection requirement for stable player IDs")
-        print("- Soft boundary correction instead of hard clipping")
+        print("Usage: python calculate_location_dual.py <video_file_path> [--debug]")
+        print("\\nSimple dual player tracking - tracks exactly 2 players without Hungarian assignment")
         sys.exit(1)
 
     video_path = sys.argv[1]
@@ -1081,15 +814,7 @@ def main():
         print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
 
-    try:
-        from scipy.spatial.distance import cdist
-        from scipy.optimize import linear_sum_assignment
-    except ImportError:
-        print("Error: SciPy required for enhanced tracking")
-        print("Install with: pip install scipy")
-        sys.exit(1)
-
-    tracker = EnhancedAnkleTracker(video_path, debug=debug)
+    tracker = SimpleAnkleTracker(video_path, debug=debug)
     tracker.run()
 
 

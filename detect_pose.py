@@ -321,9 +321,8 @@ class PoseDetector:
             enlarged_court = enlarge_uniform(corners, factor=0.3)
 
         video_info = get_video_info(video_path)
-        rally_frames = set(range(0, video_info["frame_count"]))
 
-        print(f"Processing {len(rally_frames)} frames with {method}")
+        print(f"Processing {video_info['frame_count']} frames with {method}")
 
         cap = cv2.VideoCapture(video_path)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -336,44 +335,44 @@ class PoseDetector:
                 if not ret:
                     break
 
-                if frame_idx in rally_frames:
-                    results = self.detect(frame)
+                # Process all frames
+                results = self.detect(frame)
 
-                    if results[0].keypoints is not None:
-                        keypoints = results[0].keypoints
-                        for human_idx, person_kp in enumerate(keypoints):
-                            is_valid, valid_joints = validate_pose(person_kp, enlarged_court, corners)
+                if results[0].keypoints is not None:
+                    keypoints = results[0].keypoints
+                    for human_idx, person_kp in enumerate(keypoints):
+                        is_valid, valid_joints = validate_pose(person_kp, enlarged_court, corners)
 
-                            if is_valid:
-                                xy = person_kp.xy[0]
-                                conf = person_kp.conf[0]
+                        if is_valid:
+                            xy = person_kp.xy[0]
+                            conf = person_kp.conf[0]
 
-                                joints = []
-                                for joint_idx in range(xy.shape[0]):
-                                    x, y = float(xy[joint_idx, 0].item()), float(xy[joint_idx, 1].item())
-                                    confidence = float(conf[joint_idx].item())
+                            joints = []
+                            for joint_idx in range(xy.shape[0]):
+                                x, y = float(xy[joint_idx, 0].item()), float(xy[joint_idx, 1].item())
+                                confidence = float(conf[joint_idx].item())
 
-                                    in_court = False
-                                    if confidence > CONFIDENCE_THRESHOLD:
-                                        in_court = point_in_polygon((x, y), corners, enlarged_court)
+                                in_court = False
+                                if confidence > CONFIDENCE_THRESHOLD:
+                                    in_court = point_in_polygon((x, y), corners, enlarged_court)
 
-                                    joints.append({
-                                        "joint_index": joint_idx,
-                                        "x": x,
-                                        "y": y,
-                                        "confidence": confidence,
-                                        "in_court": in_court,
-                                        "is_ankle_knee": joint_idx in ANKLE_KNEE_INDICES
-                                    })
+                                joints.append({
+                                    "joint_index": joint_idx,
+                                    "x": x,
+                                    "y": y,
+                                    "confidence": confidence,
+                                    "in_court": in_court,
+                                    "is_ankle_knee": joint_idx in ANKLE_KNEE_INDICES
+                                })
 
-                                pose_data = {
-                                    "frame_index": frame_idx,
-                                    "human_index": human_idx,
-                                    "joints": joints,
-                                    "valid_ankle_knee_joints": len(valid_joints),
-                                    "validation_joints": valid_joints
-                                }
-                                all_poses.append(pose_data)
+                            pose_data = {
+                                "frame_index": frame_idx,
+                                "human_index": human_idx,
+                                "joints": joints,
+                                "valid_ankle_knee_joints": len(valid_joints),
+                                "validation_joints": valid_joints
+                            }
+                            all_poses.append(pose_data)
 
                 frame_idx += 1
                 pbar.update(1)
@@ -385,7 +384,6 @@ class PoseDetector:
             "enlarged_court_points": enlarged_court,
             "all_court_points": court_points,
             "video_info": video_info,
-            "rally_frames": list(rally_frames),
             "pose_data": all_poses,
             "camera_calibration": {
                 "camera_matrix": calib_data['camera_matrix'].tolist() if calib_data['camera_matrix'] is not None else None,

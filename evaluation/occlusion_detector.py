@@ -263,26 +263,26 @@ class FastCourtOcclusionDetector:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # Create video writer with better compatibility
-        # Try different codecs in order of preference
+        # Ensure output is always MP4 format
+        output_video_path = str(Path(output_video_path).with_suffix('.mp4'))
+        
+        # Create video writer with MP4 codecs only
+        # Try different MP4-compatible codecs in order of preference
         codecs_to_try = [
-            ('XVID', '.avi'),  # Most compatible
-            ('mp4v', '.mp4'),  # Good compatibility
-            ('H264', '.mp4'),  # High quality but may show warnings
+            'mp4v',  # Most compatible MP4 codec
+            'H264',  # High quality
+            'avc1',  # Alternative H264 identifier
+            'MJPG',  # Motion JPEG (fallback)
         ]
 
         out = None
-        for codec, ext in codecs_to_try:
+        for codec in codecs_to_try:
             try:
-                if ext != Path(output_video_path).suffix:
-                    # Change extension to match codec
-                    output_video_path = str(Path(output_video_path).with_suffix(ext))
-
                 fourcc = cv2.VideoWriter_fourcc(*codec)
                 out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
                 if out.isOpened():
-                    print(f"Using {codec} codec for output video")
+                    print(f"Using {codec} codec for MP4 output video")
                     break
                 else:
                     out.release()
@@ -294,7 +294,8 @@ class FastCourtOcclusionDetector:
                 continue
 
         if out is None:
-            # Fallback to default
+            # Final fallback to default MP4 codec
+            print("Warning: All preferred codecs failed, using default mp4v codec")
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
