@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-CVAT-Based Badminton Tracking Evaluator
+CVAT-Based Badminton Tracking Evaluator with Automatic Player Mapping
 
 Evaluates tracking performance against CVAT ground truth annotations converted to world coordinates.
 Generates research paper style error analysis with comprehensive statistical evaluation.
+Automatically resolves player ID mapping issues by testing both configurations.
 
 Usage: python3 evaluation/evaluator.py <video_path>
 
@@ -37,6 +38,7 @@ except ImportError:
     HAS_SCIPY = False
 
 warnings.filterwarnings('ignore')
+
 
 class CVATTrackingEvaluator:
     """Evaluator for badminton tracking against CVAT ground truth with research-grade analysis."""
@@ -263,12 +265,16 @@ class CVATTrackingEvaluator:
         gt_x, gt_y = ground_truth_pos
         return math.sqrt((pred_x - gt_x)**2 + (pred_y - gt_y)**2)
 
-    def evaluate_tracking_dataset(self, positions_dict: Dict, data_type: str = "tracking") -> Dict:
-        """Evaluate tracking data against ground truth."""
+    def evaluate_with_player_mapping(self, positions_dict: Dict, data_type: str,
+                                     mapping: Dict[int, int]) -> Tuple[Dict, float]:
+        """Evaluate tracking data with a specific player ID mapping."""
         results = {
             'player_0': {'errors': [], 'frame_results': []},
             'player_1': {'errors': [], 'frame_results': []}
         }
+
+        total_error = 0.0
+        comparison_count = 0
 
         for frame_idx, gt_data in self.ground_truth.items():
             if frame_idx not in positions_dict:
@@ -276,18 +282,21 @@ class CVATTrackingEvaluator:
 
             positions = positions_dict[frame_idx]
 
-            # Evaluate each player separately
-            for player_id in [0, 1]:
-                if player_id in gt_data:
-                    gt_pos = gt_data[player_id]
-                    predicted_player = self.find_player_by_id(positions, player_id)
+            # Evaluate each player separately using the mapping
+            for gt_player_id in [0, 1]:
+                if gt_player_id in gt_data:
+                    gt_pos = gt_data[gt_player_id]
+
+                    # Use mapping to find corresponding tracking player
+                    tracking_player_id = mapping[gt_player_id]
+                    predicted_player = self.find_player_by_id(positions, tracking_player_id)
 
                     if predicted_player:
                         try:
                             predicted_pos = self.calculate_midpoint_position(predicted_player)
                             error = self.calculate_euclidean_error(predicted_pos, gt_pos)
 
-                            player_key = f'player_{player_id}'
+                            player_key = f'player_{gt_player_id}'
                             results[player_key]['errors'].append(error)
                             results[player_key]['frame_results'].append({
                                 'frame_index': frame_idx,
@@ -295,14 +304,58 @@ class CVATTrackingEvaluator:
                                 'predicted': predicted_pos,
                                 'error': error,
                                 'data_type': data_type,
-                                'player_id': player_id
+                                'player_id': gt_player_id,
+                                'tracking_player_id': tracking_player_id,
+                                'mapping_used': str(mapping)
                             })
+
+                            total_error += error
+                            comparison_count += 1
 
                         except Exception:
                             # Skip frames with invalid position data
                             continue
 
-        return results
+        avg_error = total_error / comparison_count if comparison_count > 0 else float('inf')
+        return results, avg_error
+
+    def evaluate_tracking_dataset(self, positions_dict: Dict, data_type: str = "tracking") -> Dict:
+        """Evaluate tracking data against ground truth, trying both player mappings."""
+        # Try both possible player ID mappings
+        mapping_1 = {0: 0, 1: 1}  # Direct mapping
+        mapping_2 = {0: 1, 1: 0}  # Swapped mapping
+
+        print(f"   Trying direct player mapping (GT 0→Track 0, GT 1→Track 1)...")
+        results_1, avg_error_1 = self.evaluate_with_player_mapping(positions_dict, data_type, mapping_1)
+
+        print(f"   Trying swapped player mapping (GT 0→Track 1, GT 1→Track 0)...")
+        results_2, avg_error_2 = self.evaluate_with_player_mapping(positions_dict, data_type, mapping_2)
+
+        # Choose the mapping with lower average error
+        if avg_error_1 <= avg_error_2:
+            best_results = results_1
+            best_mapping = mapping_1
+            best_error = avg_error_1
+            print(f"   Selected direct mapping (average error: {avg_error_1:.3f}m)")
+        else:
+            best_results = results_2
+            best_mapping = mapping_2
+            best_error = avg_error_2
+            print(f"   Selected swapped mapping (average error: {avg_error_2:.3f}m)")
+
+        # Store the mapping information for reporting
+        if not hasattr(self, 'player_mappings'):
+            self.player_mappings = {}
+        self.player_mappings[data_type] = {
+            'mapping': best_mapping,
+            'average_error': best_error,
+            'direct_mapping_error': avg_error_1,
+            'swapped_mapping_error': avg_error_2
+        }
+
+        print(f"   Comparison: Direct={avg_error_1:.3f}m vs Swapped={avg_error_2:.3f}m")
+
+        return best_results
 
     def calculate_comprehensive_metrics(self, errors: List[float]) -> Dict[str, Any]:
         """Calculate comprehensive statistical metrics."""
@@ -667,7 +720,25 @@ class CVATTrackingEvaluator:
         report.append(f"A jump correction algorithm was applied to reduce tracking errors")
         report.append(f"during rapid player movements.")
         report.append("")
-        report.append("1.3 Evaluation Metrics")
+        report.append("1.3 Player ID Mapping Resolution")
+        if hasattr(self, 'player_mappings'):
+            orig_mapping = self.player_mappings.get('original', {})
+            corr_mapping = self.player_mappings.get('corrected', {})
+
+            if orig_mapping:
+                report.append(f"Automatic player ID mapping resolution was employed to handle")
+                report.append(f"potential mismatches between ground truth and tracking player IDs.")
+                report.append(f"Original tracking: {orig_mapping.get('mapping', 'N/A')} mapping selected")
+                report.append(f"  Direct mapping error: {orig_mapping.get('direct_mapping_error', 0):.3f}m")
+                report.append(f"  Swapped mapping error: {orig_mapping.get('swapped_mapping_error', 0):.3f}m")
+
+                if corr_mapping:
+                    report.append(f"Corrected tracking: {corr_mapping.get('mapping', 'N/A')} mapping selected")
+                    report.append(f"  Direct mapping error: {corr_mapping.get('direct_mapping_error', 0):.3f}m")
+                    report.append(f"  Swapped mapping error: {corr_mapping.get('swapped_mapping_error', 0):.3f}m")
+                report.append("")
+
+        report.append("1.4 Evaluation Metrics")
         report.append(f"Primary metric: Mean Absolute Error (MAE) in meters")
         report.append(f"Secondary metrics: RMSE, median error, 95th percentile error")
         if HAS_SCIPY:
@@ -804,7 +875,26 @@ class CVATTrackingEvaluator:
             report.append(f"the need for algorithm refinement or larger sample sizes.")
 
         report.append("")
-        report.append("3.3 Limitations and Future Work")
+        report.append("3.3 Player ID Mapping Analysis")
+        if hasattr(self, 'player_mappings'):
+            orig_mapping = self.player_mappings.get('original', {})
+            if orig_mapping:
+                direct_error = orig_mapping.get('direct_mapping_error', 0)
+                swapped_error = orig_mapping.get('swapped_mapping_error', 0)
+                selected_mapping = orig_mapping.get('mapping', {})
+
+                if abs(direct_error - swapped_error) > 1.0:
+                    report.append(f"Significant player ID mapping issues were detected and automatically")
+                    report.append(f"resolved. The direct mapping yielded {direct_error:.3f}m average error")
+                    report.append(f"while the swapped mapping yielded {swapped_error:.3f}m average error.")
+                    report.append(f"This indicates inconsistent player labeling between ground truth")
+                    report.append(f"and tracking data, which was corrected by selecting the optimal mapping.")
+                else:
+                    report.append(f"Player ID mapping was consistent between ground truth and tracking")
+                    report.append(f"data, with minimal difference between mapping strategies.")
+
+        report.append("")
+        report.append("3.4 Limitations and Future Work")
         report.append(f"This evaluation was conducted on a single video sequence and may not")
         report.append(f"generalize to all court conditions, lighting scenarios, or player")
         report.append(f"movement patterns. Future work should include:")
@@ -897,13 +987,17 @@ class CVATTrackingEvaluator:
                 'video_name': self.video_name,
                 'video_path': str(self.video_path),
                 'evaluation_timestamp': datetime.now().isoformat(),
-                'evaluator_version': 'CVAT_Research_Evaluator_v1.0',
+                'evaluator_version': 'CVAT_Research_Evaluator_v3.0_AutoOptimization',
                 'ground_truth_method': 'CVAT_manual_annotation',
                 'coordinate_system': 'world_coordinates_homography',
                 'dependencies': {
                     'scipy_available': HAS_SCIPY,
                     'seaborn_available': HAS_SEABORN
                 }
+            },
+            'optimization_analysis': {
+                'evaluation_configs': getattr(self, 'evaluation_configs', {}),
+                'all_combinations': getattr(self, 'all_combinations', {})
             },
             'data_summary': {
                 'ground_truth_frames': len(self.ground_truth),
@@ -1034,7 +1128,7 @@ class CVATTrackingEvaluator:
         print("Creating research analysis plots...")
         self.create_research_plots()
 
-        # Save comprehensive results
+        # Save comprehensive results with mapping information
         print("Saving comprehensive evaluation results...")
         self.save_comprehensive_results(all_metrics, statistical_tests)
 
@@ -1043,20 +1137,45 @@ class CVATTrackingEvaluator:
         print("EVALUATION SUMMARY")
         print("="*60)
 
+        # Print mapping information
+        if hasattr(self, 'player_mappings'):
+            print("PLAYER ID MAPPING RESOLUTION:")
+            for data_type, mapping_info in self.player_mappings.items():
+                mapping = mapping_info['mapping']
+                print(f"  {data_type.title()}: GT Player 0→Track Player {mapping[0]}, GT Player 1→Track Player {mapping[1]}")
+                print(f"    Direct mapping would give: {mapping_info['direct_mapping_error']:.3f}m average error")
+                print(f"    Swapped mapping would give: {mapping_info['swapped_mapping_error']:.3f}m average error")
+                print(f"    Selected mapping gives: {mapping_info['average_error']:.3f}m average error")
+            print("")
+
         # Print key findings
         if all_metrics.get('original') and all_metrics.get('corrected'):
             orig_mae = all_metrics['original']['mean']
             corr_mae = all_metrics['corrected']['mean']
             improvement = ((orig_mae - corr_mae) / orig_mae) * 100
 
-            print(f"Original MAE: {orig_mae:.3f}m")
-            print(f"Corrected MAE: {corr_mae:.3f}m")
-            print(f"Improvement: {improvement:.1f}%")
+            print(f"PERFORMANCE METRICS:")
+            print(f"  Original MAE: {orig_mae:.3f}m")
+            print(f"  Corrected MAE: {corr_mae:.3f}m")
+            print(f"  Improvement: {improvement:.1f}%")
+            print("")
 
             if statistical_tests.get('independent_t_test', {}).get('significant', False):
-                print("Improvement is statistically significant (p < 0.05)")
+                print("  Improvement is statistically significant (p < 0.05)")
             else:
-                print("Improvement not statistically significant")
+                print("  Improvement not statistically significant")
+
+            # Performance assessment
+            if corr_mae < 0.5:
+                assessment = "EXCELLENT - suitable for detailed analysis"
+            elif corr_mae < 1.0:
+                assessment = "GOOD - suitable for general tracking"
+            elif corr_mae < 2.0:
+                assessment = "ACCEPTABLE - may need refinement"
+            else:
+                assessment = "POOR - requires significant improvement"
+
+            print(f"  Overall Assessment: {assessment}")
 
         print(f"\nAll results saved to: {self.results_dir}")
         print("CVAT-based evaluation completed successfully!")
@@ -1070,15 +1189,17 @@ def main():
         description='CVAT-Based Badminton Tracking Evaluator with Research Analysis',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-CVAT-Based Badminton Tracking Evaluator
-=====================================
+CVAT-Based Badminton Tracking Evaluator with Automatic Player Mapping
+===================================================================
 
 This evaluator performs comprehensive research-grade analysis of badminton 
-tracking systems against CVAT ground truth annotations.
+tracking systems against CVAT ground truth annotations with automatic
+resolution of player ID mapping issues.
 
 Features:
 • Evaluates against CVAT ground truth (cvat_ground_truth.json)
 • Compares original vs corrected tracking performance
+• Automatic player ID mapping resolution
 • Generates research paper style error analysis
 • Performs statistical significance testing (requires scipy)
 • Creates publication-quality plots

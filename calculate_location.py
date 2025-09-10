@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simple Dual Player Tracker for Badminton - No Hungarian Assignment
-
-This implementation tracks exactly 2 players using simple distance-based assignment,
-eliminating the complex Hungarian assignment that was causing excessive player ID creation.
-
-Usage: python calculate_location_dual.py <video_file_path> [--debug]
-"""
 
 import sys
 import os
@@ -22,7 +14,6 @@ import math
 
 
 def convert_numpy_types(obj):
-    """Convert numpy types to Python native types for JSON serialization."""
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
@@ -407,17 +398,17 @@ class DualPlayerTracker:
         print("=" * 45)
 
 
-class SimpleAnkleTracker:
-    """Simple dual player ankle tracker."""
+class Enhanced3DAnkleTracker:
+    """Enhanced ankle tracker with proper 3D geometric ankle offset calculation."""
 
     COURT_WIDTH = 6.1
     COURT_LENGTH = 13.4
     ANKLE_LEFT = 15
     ANKLE_RIGHT = 16
     CONFIDENCE_THRESHOLD = 0.5
-    BASE_ANKLE_OFFSET = 0.04
+    ANKLE_HEIGHT_METERS = 0.04  # 4cm ankle height above ground
 
-    def __init__(self, video_path: str, debug: bool = False):
+    def __init__(self, video_path: str, debug: bool = False, reflect_y: bool = False):
         self.video_path = Path(video_path)
         self.video_name = self.video_path.stem
         self.results_dir = Path("results") / self.video_name
@@ -425,16 +416,21 @@ class SimpleAnkleTracker:
         self.calibration_file = self.results_dir / "calibration.csv"
         self.output_file = self.results_dir / "positions.json"
         self.debug = debug
+        self.reflect_y = reflect_y
 
         self.pose_data = None
         self.court_points = None
         self.video_info = None
         self.homography_matrix = None
+
+        # Camera calibration parameters
         self.camera_matrix = None
         self.dist_coeffs = None
         self.camera_height = None
+        self.camera_tilt_angle = None  # θ in radians
+        self.fy = None  # Vertical focal length
+        self.v0 = None  # Principal point vertical coordinate
         self.calibration_available = False
-        self.enhanced_ankle_offset = None
 
         self.player_tracker = DualPlayerTracker(
             court_width=self.COURT_WIDTH,
@@ -445,7 +441,7 @@ class SimpleAnkleTracker:
         self.frame_data_internal = {}
 
     def load_calibration_data(self) -> None:
-        """Load calibration for homography enhancement."""
+        """Load enhanced calibration data with camera tilt angle."""
         if not self.calibration_file.exists():
             if self.debug:
                 print("No calibration data - using basic homography")
@@ -467,11 +463,14 @@ class SimpleAnkleTracker:
                             calibration_params[key] = float(value)
                         elif key == 'camera_height_m':
                             calibration_params['camera_height_m'] = float(value)
+                        elif key == 'camera_tilt_deg':
+                            calibration_params['camera_tilt_deg'] = float(value)
                         elif key == 'reprojection_error_px':
                             calibration_params['reprojection_error_px'] = float(value)
                     except (ValueError, IndexError):
                         continue
 
+            # Set up camera matrix
             if all(param in calibration_params for param in ['fx', 'fy', 'cx', 'cy']):
                 self.camera_matrix = np.array([
                     [calibration_params['fx'], 0, calibration_params['cx']],
@@ -479,6 +478,10 @@ class SimpleAnkleTracker:
                     [0, 0, 1]
                 ], dtype=np.float32)
 
+                self.fy = calibration_params['fy']
+                self.v0 = calibration_params['cy']
+
+            # Set up distortion coefficients
             dist_coeffs = []
             for param in ['k1', 'k2', 'p1', 'p2', 'k3']:
                 if param in calibration_params:
@@ -486,26 +489,91 @@ class SimpleAnkleTracker:
             if dist_coeffs:
                 self.dist_coeffs = np.array(dist_coeffs, dtype=np.float32)
 
+            # Camera geometry parameters
             self.camera_height = calibration_params.get('camera_height_m')
+            camera_tilt_deg = calibration_params.get('camera_tilt_deg', 0.0)
+            self.camera_tilt_angle = math.radians(camera_tilt_deg)  # Convert to radians
+
             reprojection_error = calibration_params.get('reprojection_error_px')
 
+            # Check if we have sufficient calibration for 3D correction
             self.calibration_available = (
                     self.camera_matrix is not None and
                     self.camera_height is not None and
+                    self.fy is not None and
+                    self.v0 is not None and
                     (reprojection_error is None or reprojection_error < 30)
             )
 
             if self.calibration_available:
-                focal_length = (self.camera_matrix[0, 0] + self.camera_matrix[1, 1]) / 2
-                pixel_to_meter_ratio = focal_length / self.camera_height
-                self.enhanced_ankle_offset = self.BASE_ANKLE_OFFSET * pixel_to_meter_ratio
                 if self.debug:
-                    print(f"Calibration loaded, error: {reprojection_error:.1f}px")
+                    print(f"Enhanced 3D calibration loaded:")
+                    print(f"  Camera height: {self.camera_height:.2f}m")
+                    print(f"  Camera tilt: {camera_tilt_deg:.1f}°")
+                    print(f"  Focal length (fy): {self.fy:.1f}px")
+                    print(f"  Reprojection error: {reprojection_error:.1f}px")
+            else:
+                if self.debug:
+                    print("Insufficient calibration data for 3D correction")
 
         except Exception as e:
             if self.debug:
                 print(f"Calibration load error: {e}")
             self.calibration_available = False
+
+    def calculate_3d_ankle_offset_pixel_correction(self, ankle_pixel: Tuple[float, float]) -> float:
+        """
+        Calculate proper 3D ankle offset using the paper's approach.
+
+        This implements the equations from the paper:
+        Y_c = Y_w * sin(θ) + h * cos(θ)
+        Z_c = Y_w * cos(θ) - h * sin(θ)
+        Δv(s) = f_y * [(Y_c - s*cos(θ))/(Z_c + s*sin(θ)) - Y_c/Z_c]
+
+        Returns: pixel offset in v (vertical) direction to subtract from ankle position
+        """
+        if not self.calibration_available:
+            return 12.0  # Fallback to fixed pixel offset
+
+        try:
+            # First, transform ankle pixel to rough world coordinates to estimate Y_w
+            ankle_point = np.array([[ankle_pixel]], dtype=np.float32)
+            rough_world = cv2.perspectiveTransform(ankle_point, self.homography_matrix)
+            Y_w = float(rough_world[0][0][1])  # Y-distance along court from camera
+
+            # Camera geometry parameters
+            h = self.camera_height
+            theta = self.camera_tilt_angle
+            s = self.ANKLE_HEIGHT_METERS
+
+            # Calculate camera frame coordinates for ground point (s=0)
+            Y_c = Y_w * math.sin(theta) + h * math.cos(theta)
+            Z_c = Y_w * math.cos(theta) - h * math.sin(theta)
+
+            # Avoid division by zero
+            if abs(Z_c) < 0.1:
+                Z_c = 0.1 if Z_c >= 0 else -0.1
+
+            # Calculate the pixel offset using the paper's formula
+            # This is the difference between where elevated ankle appears vs ground position
+            ground_projection = Y_c / Z_c
+            elevated_projection = (Y_c - s * math.cos(theta)) / (Z_c + s * math.sin(theta))
+
+            # Convert to pixel coordinates (note: we want the magnitude of correction)
+            delta_v = self.fy * (elevated_projection - ground_projection)
+
+            # Clamp to reasonable values (safety check)
+            delta_v = max(-50.0, min(50.0, delta_v))
+
+            if self.debug and abs(delta_v) > 0.1:
+                print(f"3D offset calc: Y_w={Y_w:.1f}m, delta_v={delta_v:.1f}px")
+
+            return float(delta_v)
+
+        except Exception as e:
+            if self.debug:
+                print(f"3D offset calculation failed: {e}")
+            return 12.0  # Fallback
 
     def load_pose_data(self) -> None:
         """Load pose detection data."""
@@ -577,27 +645,33 @@ class SimpleAnkleTracker:
             return point
 
     def calculate_ankle_ground_position(self, ankle_pixel: Tuple[float, float]) -> Tuple[float, float]:
-        """Calculate ankle ground position with enhanced homography."""
+        """Calculate ankle ground position with proper 3D geometric correction."""
         try:
+            # Step 1: Undistort the pixel if calibration is available
             if self.calibration_available:
                 undistorted_pixel = self.undistort_point(ankle_pixel)
             else:
                 undistorted_pixel = ankle_pixel
 
-            if self.enhanced_ankle_offset is not None:
-                offset_y = self.enhanced_ankle_offset
-            else:
-                offset_y = 12.0
+            # Step 2: Calculate the proper 3D geometric offset
+            pixel_offset = self.calculate_3d_ankle_offset_pixel_correction(undistorted_pixel)
 
-            corrected_pixel = (undistorted_pixel[0], undistorted_pixel[1] + offset_y)
+            # Step 3: Apply the offset (positive offset moves point down in image)
+            # Since we want to find where the ground contact would be, we need to offset downward
+            corrected_pixel = (undistorted_pixel[0], undistorted_pixel[1] + abs(pixel_offset))
 
+            # Step 4: Transform to world coordinates
             point = np.array([[corrected_pixel]], dtype=np.float32)
             world_point = cv2.perspectiveTransform(point, self.homography_matrix)
 
             world_x = float(world_point[0][0][0])
             world_y = float(world_point[0][0][1])
 
-            # Soft boundary correction
+            # Step 5: Apply reflection if requested
+            if self.reflect_y:
+                world_x = self.COURT_WIDTH - world_x
+
+            # Step 6: Soft boundary correction
             if world_x < -1.0:
                 world_x = -1.0 + (world_x + 1.0) * 0.3
             elif world_x > self.COURT_WIDTH + 1.0:
@@ -625,9 +699,10 @@ class SimpleAnkleTracker:
         return None
 
     def process_person_ankles(self, joints: List[Dict]) -> List[Dict[str, Any]]:
-        """Process ankle positions for a person."""
+        """Process ankle positions for a person with enhanced 3D correction."""
         ankle_detections = []
 
+        # Process left ankle
         ankle_left_pixel = self.extract_joint_position(joints, self.ANKLE_LEFT)
         if ankle_left_pixel:
             left_world_x, left_world_y = self.calculate_ankle_ground_position(ankle_left_pixel)
@@ -643,9 +718,10 @@ class SimpleAnkleTracker:
                 'world_x': float(left_world_x),
                 'world_y': float(left_world_y),
                 'joint_confidence': left_confidence,
-                'method': 'simple_dual_tracking'
+                'method': 'enhanced_3d_geometric'
             })
 
+        # Process right ankle
         ankle_right_pixel = self.extract_joint_position(joints, self.ANKLE_RIGHT)
         if ankle_right_pixel:
             right_world_x, right_world_y = self.calculate_ankle_ground_position(ankle_right_pixel)
@@ -661,7 +737,7 @@ class SimpleAnkleTracker:
                 'world_x': float(right_world_x),
                 'world_y': float(right_world_y),
                 'joint_confidence': right_confidence,
-                'method': 'simple_dual_tracking'
+                'method': 'enhanced_3d_geometric'
             })
 
         return ankle_detections
@@ -682,7 +758,7 @@ class SimpleAnkleTracker:
                 self.frame_data_internal[frame_index] = player_assignments
 
     def process_all_frames(self) -> None:
-        """Process all frames with simple dual tracking."""
+        """Process all frames with enhanced 3D tracking."""
         pose_data = self.pose_data.get('pose_data', [])
 
         if not pose_data:
@@ -697,7 +773,8 @@ class SimpleAnkleTracker:
             frames_data[frame_idx].append(entry)
 
         if self.debug:
-            print(f"Processing {len(frames_data)} frames with simple dual tracking")
+            method = "enhanced 3D geometric" if self.calibration_available else "basic homography"
+            print(f"Processing {len(frames_data)} frames with {method} correction")
 
         for frame_idx in sorted(frames_data.keys()):
             frame_data = frames_data[frame_idx]
@@ -728,7 +805,7 @@ class SimpleAnkleTracker:
         return standard_frame_data
 
     def save_results(self) -> None:
-        """Save results with tracking metadata."""
+        """Save results with enhanced tracking metadata."""
         frame_data_dict = self.convert_to_standard_format()
 
         total_frames_with_data = len(frame_data_dict)
@@ -743,6 +820,9 @@ class SimpleAnkleTracker:
                 player_1_detections += len(frame_data['player_1']['ankles'])
 
         total_ankle_detections = player_0_detections + player_1_detections
+
+        # Determine method used
+        method = "enhanced_3d_geometric" if self.calibration_available else "basic_homography"
 
         output_data = {
             'video_info': {
@@ -762,8 +842,17 @@ class SimpleAnkleTracker:
                 'total_ankle_detections': total_ankle_detections,
                 'player_0_detections': player_0_detections,
                 'player_1_detections': player_1_detections,
-                'method': 'simple_dual_tracking',
-                'players_created': 2
+                'method': method,
+                'players_created': 2,
+                'ankle_offset_method': 'proper_3d_geometric' if self.calibration_available else 'fixed_pixel',
+                'ankle_height_meters': self.ANKLE_HEIGHT_METERS
+            },
+            'calibration_info': {
+                'calibration_available': self.calibration_available,
+                'camera_height_m': self.camera_height,
+                'camera_tilt_deg': math.degrees(self.camera_tilt_angle) if self.camera_tilt_angle else None,
+                'vertical_focal_length': self.fy,
+                'uses_3d_correction': self.calibration_available
             },
             'frame_data': frame_data_dict
         }
@@ -778,11 +867,11 @@ class SimpleAnkleTracker:
         print(f"Frames with data: {total_frames_with_data}")
         print(f"Player 0: {player_0_detections} detections")
         print(f"Player 1: {player_1_detections} detections")
-        print(f"Method: Simple dual tracking (NO Hungarian assignment)")
+        print(f"Method: Enhanced 3D geometric ankle correction" if self.calibration_available else "Method: Basic homography with fixed offset")
 
     def run(self) -> None:
-        """Run simple dual tracking pipeline."""
-        print(f"Starting simple dual player tracking: {self.video_name}")
+        """Run enhanced dual tracking pipeline."""
+        print(f"Starting enhanced dual player tracking: {self.video_name}")
 
         try:
             self.load_calibration_data()
@@ -790,7 +879,11 @@ class SimpleAnkleTracker:
             self.calculate_homography()
             self.process_all_frames()
             self.save_results()
-            print("Simple dual tracking completed!")
+
+            if self.calibration_available:
+                print("Enhanced 3D geometric tracking completed!")
+            else:
+                print("Basic tracking completed (no 3D calibration available)!")
 
         except Exception as e:
             print(f"Error during processing: {e}")
@@ -803,18 +896,18 @@ class SimpleAnkleTracker:
 def main():
     """Main function."""
     if len(sys.argv) < 2:
-        print("Usage: python calculate_location_dual.py <video_file_path> [--debug]")
-        print("\\nSimple dual player tracking - tracks exactly 2 players without Hungarian assignment")
+        print("Usage: python calculate_location.py <video_file_path> [--debug] [--reflect-y]")
         sys.exit(1)
 
     video_path = sys.argv[1]
     debug = "--debug" in sys.argv
+    reflect_y = "--reflect-y" in sys.argv
 
     if not os.path.exists(video_path):
         print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
 
-    tracker = SimpleAnkleTracker(video_path, debug=debug)
+    tracker = Enhanced3DAnkleTracker(video_path, debug=debug, reflect_y=reflect_y)
     tracker.run()
 
 
